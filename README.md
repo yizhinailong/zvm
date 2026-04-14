@@ -18,13 +18,21 @@ Manage multiple Zig compiler installations, switch between versions instantly, a
 
 ### Pre-built Binaries
 
-Download the latest release for your platform from the [Releases](https://github.com/lispking/zvm/releases) page.
+One-line install from the [latest release](https://github.com/lispking/zvm/releases/latest):
 
 ```bash
-# Example: macOS/arm64
-curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-macos-aarch64.tar.gz | tar xz
-chmod +x zvm
-sudo mv zvm /usr/local/bin/
+# macOS (Apple Silicon)
+curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-aarch64-macos.tar.gz | tar xz
+# macOS (Intel)
+curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-x86_64-macos.tar.gz | tar xz
+# Linux (x86_64)
+curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-x86_64-linux.tar.gz | tar xz
+# Linux (ARM64)
+curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-aarch64-linux.tar.gz | tar xz
+```
+
+```bash
+cd zvm-*/ && sudo mv zvm /usr/local/bin/
 ```
 
 ### Build from Source

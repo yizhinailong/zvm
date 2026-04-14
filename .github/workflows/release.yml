@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -54,7 +54,7 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
         shell: bash
 
-      - name: Package (Unix)
+      - name: Package versioned (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p zvm-${{ github.ref_name }}-${{ matrix.arch }}
@@ -63,7 +63,7 @@ jobs:
           tar czvf zvm-${{ github.ref_name }}-${{ matrix.arch }}.tar.gz zvm-${{ github.ref_name }}-${{ matrix.arch }}
         shell: bash
 
-      - name: Package (Windows)
+      - name: Package versioned (Windows)
         if: runner.os == 'Windows'
         run: |
           New-Item -ItemType Directory -Force -Path "zvm-${{ github.ref_name }}-${{ matrix.arch }}"
@@ -73,18 +73,48 @@ jobs:
           Compress-Archive -Path "zvm-${{ github.ref_name }}-${{ matrix.arch }}" -DestinationPath "zvm-${{ github.ref_name }}-${{ matrix.arch }}.zip" -Force
         shell: pwsh
 
-      - name: Upload artifacts
+      - name: Package latest (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p zvm-${{ matrix.arch }}
+          cp zig-out/bin/zvm zvm-${{ matrix.arch }}/
+          cp README.md LICENSE zvm-${{ matrix.arch }}/ 2>/dev/null || true
+          tar czvf zvm-${{ matrix.arch }}.tar.gz zvm-${{ matrix.arch }}
+        shell: bash
+
+      - name: Package latest (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path "zvm-${{ matrix.arch }}"
+          Copy-Item zig-out/bin/zvm.exe "zvm-${{ matrix.arch }}/" -ErrorAction SilentlyContinue
+          Copy-Item README.md "zvm-${{ matrix.arch }}/" -ErrorAction SilentlyContinue
+          Copy-Item LICENSE "zvm-${{ matrix.arch }}/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "zvm-${{ matrix.arch }}" -DestinationPath "zvm-${{ matrix.arch }}.zip" -Force
+        shell: pwsh
+
+      - name: Upload versioned artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: zvm-${{ github.ref_name }}-${{ matrix.arch }}
+          name: zvm-versioned-${{ matrix.arch }}
           path: |
             zvm-${{ github.ref_name }}-*.tar.gz
             zvm-${{ github.ref_name }}-*.zip
           retention-days: 7
 
+      - name: Upload latest artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: zvm-latest-${{ matrix.arch }}
+          path: |
+            zvm-x86_64-*.tar.gz
+            zvm-x86_64-*.zip
+            zvm-aarch64-*.tar.gz
+            zvm-aarch64-*.zip
+          retention-days: 7
+
   create-release:
     name: Create Release
-    needs: build-and-release
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,61 +123,69 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download artifacts
+      - name: Download versioned artifacts
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          path: artifacts/version
           merge-multiple: true
-          pattern: zvm-${{ github.ref_name }}-*
+          pattern: zvm-versioned-*
+
+      - name: Download latest artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/latest
+          merge-multiple: true
+          pattern: zvm-latest-*
 
       - name: List artifacts
-        run: ls -la artifacts/
+        run: |
+          echo "=== Versioned ===" && ls -la artifacts/version/
+          echo "=== Latest ===" && ls -la artifacts/latest/
 
-      - name: Create Release
+      - name: Create Versioned Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: false
-          files: artifacts/zvm-${{ github.ref_name }}-*.tar.gz,artifacts/zvm-${{ github.ref_name }}-*.zip
+          files: |
+            artifacts/version/zvm-${{ github.ref_name }}-*.tar.gz
+            artifacts/version/zvm-${{ github.ref_name }}-*.zip
           generate_release_notes: true
           body: |
             ## ZVM ${{ github.ref_name }}
 
             A fast, dependency-free Zig version manager.
 
-            ### Installation
+            ### One-line Install
 
-            Download the appropriate archive for your platform and extract it:
-
-            **Linux/macOS:**
             ```bash
-            tar xzvf zvm-${{ github.ref_name }}-<platform>.tar.gz
-            cd zvm-${{ github.ref_name }}-<platform>
-            sudo mv zvm /usr/local/bin/
+            # macOS (Apple Silicon)
+            curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-aarch64-macos.tar.gz | tar xz
+            # macOS (Intel)
+            curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-x86_64-macos.tar.gz | tar xz
+            # Linux (x86_64)
+            curl -L https://github.com/lispking/zvm/releases/latest/download/zvm-x86_64-linux.tar.gz | tar xz
             ```
 
-            **Add to PATH:**
             ```bash
+            sudo mv zvm-*/zvm /usr/local/bin/
             export PATH="$HOME/.zvm/bin:$PATH"
-            ```
-
-            **Windows:**
-            ```powershell
-            Expand-Archive zvm-${{ github.ref_name }}-<platform>.zip
             ```
 
             ### Available Builds
 
-            | Platform | Architecture | File |
-            |----------|--------------|------|
-            | Linux | x86_64 | `zvm-${{ github.ref_name }}-x86_64-linux.tar.gz` |
-            | Linux | ARM64 | `zvm-${{ github.ref_name }}-aarch64-linux.tar.gz` |
-            | macOS | Intel | `zvm-${{ github.ref_name }}-x86_64-macos.tar.gz` |
-            | macOS | Apple Silicon | `zvm-${{ github.ref_name }}-aarch64-macos.tar.gz` |
-            | Windows | x86_64 | `zvm-${{ github.ref_name }}-x86_64-windows.zip` |
-            | Windows | ARM64 | `zvm-${{ github.ref_name }}-aarch64-windows.zip` |
+            | Platform | Architecture | Stable URL |
+            |----------|--------------|------------|
+            | Linux | x86_64 | `zvm-x86_64-linux.tar.gz` |
+            | Linux | ARM64 | `zvm-aarch64-linux.tar.gz` |
+            | macOS | Intel | `zvm-x86_64-macos.tar.gz` |
+            | macOS | Apple Silicon | `zvm-aarch64-macos.tar.gz` |
+            | Windows | x86_64 | `zvm-x86_64-windows.zip` |
+            | Windows | ARM64 | `zvm-aarch64-windows.zip` |
+
+            All available at `https://github.com/lispking/zvm/releases/latest/download/<file>`
 
             ### Quick Start
 
@@ -157,4 +195,14 @@ jobs:
             zig version
             ```
 
-            All binaries are built from the tagged source code. Check the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for build logs.
+      - name: Update Latest Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          sleep 2
+          gh release create latest \
+            --title "Latest" \
+            --notes "Latest stable release (${{ github.ref_name }})." \
+            --target ${{ github.sha }} \
+            artifacts/latest/zvm-*.tar.gz artifacts/latest/zvm-*.zip
