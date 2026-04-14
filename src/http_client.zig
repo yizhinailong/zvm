@@ -145,10 +145,7 @@ pub fn attemptMirrorDownload(
     settings: *settings_mod.Settings,
 ) ![]const u8 {
     // Extract filename once (used for constructing mirror URLs and extracting base URL)
-    const filename = if (std.mem.lastIndexOfScalar(u8, original_url, '/'))
-        |idx| original_url[idx + 1 ..]
-    else
-        original_url;
+    const filename = if (std.mem.lastIndexOfScalar(u8, original_url, '/')) |idx| original_url[idx + 1 ..] else original_url;
 
     // --- Cache-fast path: try cached mirror if fresh ---
     if (settings.preferred_mirror.len > 0 and settings.mirror_updated_at > 0) {
