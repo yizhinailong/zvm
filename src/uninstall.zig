@@ -13,8 +13,6 @@ pub fn run(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    _ = allocator;
-
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = zvm.versionPath(&buf, version);
 
@@ -26,15 +24,13 @@ pub fn run(
     };
 
     // Warn if this is the currently active version
-    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const bin_path = zvm.binPath(&link_buf);
-    var target_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
-    if (std.posix.readlink(bin_path, &target_buf)) |target| {
-        if (std.mem.containsAtLeast(u8, target, 1, version)) {
+    if (zvm.getActiveVersion(allocator)) |active| {
+        defer allocator.free(active);
+        if (std.mem.eql(u8, active, version)) {
             try stderr.print("Warning: {s} is the active version. Remove the symlink first.\n", .{version});
             try stderr.flush();
         }
-    } else |_| {}
+    }
 
     // Delete the version directory tree
     std.fs.cwd().deleteTree(path) catch |err| {

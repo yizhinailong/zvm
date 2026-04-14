@@ -110,8 +110,9 @@ pub const ZVM = struct {
         return true;
     }
 
-    /// Set the active Zig version by creating/updating the ~/.zvm/bin symlink.
-    /// The symlink points to the absolute path of the version directory.
+    /// Set the active Zig version by creating/updating the ~/.zvm/bin symlink
+    /// and writing the version name to a .active marker file.
+    /// The symlink/junction points to the absolute path of the version directory.
     pub fn setBin(self: *ZVM, version: []const u8) !void {
         var target_buf: [std.fs.max_path_bytes]u8 = undefined;
         const target = self.versionPath(&target_buf, version);
@@ -123,22 +124,33 @@ pub const ZVM = struct {
         // Remove existing symlink, then create new one pointing to the version directory.
         platform.removeSymlink(link_path);
         try platform.createSymlink(target, link_path);
+
+        // Write active version marker file (used by getActiveVersion, works on all platforms)
+        var active_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const active_path = std.fmt.bufPrint(&active_buf, "{s}/.active", .{self.base_dir}) catch return;
+        const file = std.fs.cwd().createFile(active_path, .{}) catch return;
+        defer file.close();
+        var w_buf: [256]u8 = undefined;
+        var writer = file.writer(&w_buf);
+        writer.interface.writeAll(version) catch {};
+        writer.interface.flush() catch {};
     }
 
-    /// Get the currently active version by reading the ~/.zvm/bin symlink target.
-    /// Returns null if no symlink exists or it cannot be read.
+    /// Get the currently active version by reading the .active marker file.
+    /// Returns null if no active version is set.
     /// Caller owns the returned memory.
     pub fn getActiveVersion(self: *ZVM, allocator: std.mem.Allocator) ?[]const u8 {
-        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const link_path = self.binPath(&link_buf);
+        var active_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const active_path = std.fmt.bufPrint(&active_buf, "{s}/.active", .{self.base_dir}) catch return null;
 
-        var target_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
-        const target = std.posix.readlink(link_path, &target_buf) catch return null;
+        const file = std.fs.cwd().openFile(active_path, .{}) catch return null;
+        defer file.close();
 
-        // Extract version name from the target path (last path component)
-        if (std.mem.lastIndexOfScalar(u8, target, '/')) |idx| {
-            return allocator.dupe(u8, target[idx + 1 ..]) catch return null;
-        }
-        return allocator.dupe(u8, target) catch return null;
+        const content = file.readToEndAlloc(allocator, 256) catch return null;
+        defer allocator.free(content);
+
+        const trimmed = std.mem.trim(u8, content, " \n\r");
+        if (trimmed.len == 0) return null;
+        return allocator.dupe(u8, trimmed) catch return null;
     }
 };

@@ -63,9 +63,27 @@ pub fn getArchiveExtension() []const u8 {
 
 /// Create a symbolic link at `link_path` pointing to `target`.
 /// Removes any existing file/link at `link_path` before creation.
+/// On Windows, creates a directory junction (no admin privileges required).
 pub fn createSymlink(target: []const u8, link_path: []const u8) !void {
     // Remove existing link/dir first
     std.fs.cwd().deleteFile(link_path) catch {};
+
+    if (builtin.os.tag == .windows) {
+        // On Windows, use directory junction via mklink /J.
+        // Junctions work without administrator privileges and behave like
+        // directory symlinks — the linked path resolves transparently.
+        std.fs.cwd().deleteDir(link_path) catch {};
+        const result = std.process.Child.run(.{
+            .allocator = std.heap.page_allocator,
+            .argv = &.{ "cmd", "/c", "mklink", "/J", link_path, target },
+        }) catch return error.SymlinkFailed;
+        defer std.heap.page_allocator.free(result.stdout);
+        defer std.heap.page_allocator.free(result.stderr);
+        if (result.term != .Exited or result.term.Exited != 0)
+            return error.SymlinkFailed;
+        return;
+    }
+
     std.posix.symlink(target, link_path) catch |err| switch (err) {
         error.PathAlreadyExists => {
             // Try harder to remove
@@ -77,7 +95,12 @@ pub fn createSymlink(target: []const u8, link_path: []const u8) !void {
 }
 
 /// Remove a symbolic link at the given path (best-effort, ignores errors).
+/// On Windows, junctions are removed as directories.
 pub fn removeSymlink(path: []const u8) void {
+    if (builtin.os.tag == .windows) {
+        std.fs.cwd().deleteDir(path) catch {};
+        return;
+    }
     std.fs.cwd().deleteFile(path) catch {};
 }
 
