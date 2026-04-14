@@ -9,9 +9,15 @@ const zvm_mod = @import("zvm.zig");
 const terminal = @import("terminal.zig");
 const errors = @import("errors.zig");
 const platform = @import("platform.zig");
+const build_options = @import("build_options");
 
-/// Current version of zvm.
+/// Current version of zvm (without 'v' prefix for comparison).
 const VERSION = "0.1.0";
+
+/// Full version string with 'v' prefix and git commit hash.
+fn fullVersion() []const u8 {
+    return "v" ++ VERSION ++ " (" ++ build_options.git_commit ++ ")";
+}
 
 /// Application entry point.
 /// Sets up memory allocators, parses CLI arguments, initializes the ZVM environment,
@@ -69,7 +75,7 @@ pub fn main() !void {
             try cli.printHelp(stdout);
         },
         .version => {
-            try stdout.print("zvm {s}\n", .{VERSION});
+            try stdout.print("zvm {s}\n", .{fullVersion()});
             try stdout.flush();
         },
         .install => |inst| {
@@ -127,7 +133,7 @@ pub fn main() !void {
         },
         .upgrade => {
             const upgrade = @import("upgrade.zig");
-            upgrade.run(&zvm, allocator, stdout, stderr) catch |err| {
+            upgrade.run(&zvm, allocator, VERSION, stdout, stderr) catch |err| {
                 try terminal.printError(stderr, @errorName(err));
                 try stderr.flush();
                 std.process.exit(1);

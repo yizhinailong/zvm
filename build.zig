@@ -4,6 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Embed git commit hash at build time
+    const git_commit = blk: {
+        const result = std.process.Child.run(.{
+            .allocator = b.allocator,
+            .argv = &.{ "git", "rev-parse", "--short", "HEAD" },
+        }) catch break :blk "unknown";
+        break :blk std.mem.trim(u8, result.stdout, " \n\r");
+    };
+
     const exe = b.addExecutable(.{
         .name = "zvm",
         .root_module = b.createModule(.{
@@ -12,6 +21,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "git_commit", git_commit);
+    exe.root_module.addOptions("build_options", options);
 
     b.installArtifact(exe);
 

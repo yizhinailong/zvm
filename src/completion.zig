@@ -20,7 +20,7 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\#compdef zvm
         \\
-        \\zvm() {
+        \\_zvm_completion() {
         \\  local -a commands
         \\  commands=(
         \\    'install:Install a Zig version'
