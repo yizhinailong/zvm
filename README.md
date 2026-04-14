@@ -20,9 +20,17 @@ Manage multiple Zig compiler installations, switch between versions instantly, a
 
 ## Installation
 
-### Pre-built Binaries
+### One-line Install (Recommended)
 
-One-line install from the [latest release](https://github.com/lispking/zvm/releases/latest):
+Automatically detects your platform, downloads zvm, sets up PATH and shell completion:
+
+```bash
+curl -L https://raw.githubusercontent.com/lispking/zvm/main/install.sh | bash
+```
+
+### Manual Install
+
+Download the [latest release](https://github.com/lispking/zvm/releases/latest) for your platform:
 
 ```bash
 # macOS (Apple Silicon)
