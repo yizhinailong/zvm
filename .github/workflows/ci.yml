@@ -21,7 +21,7 @@ jobs:
           version: '0.16.0'
 
       - name: Build
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-gnu
+        run: zig build
         shell: bash
 
       - name: Run tests
