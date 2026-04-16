@@ -3,6 +3,10 @@
 //! for maximum parallelism — completely bypasses std.http.Client and std.Io.
 //! On Windows: uses std.http.Client per probe thread (Winsock API not fully wrapped in Zig 0.16).
 //! A background ticker thread provides real-time progress display.
+//!
+//! Cross-compilation note: native_os (builtin.os.tag) is a comptime constant, so
+//! `if (native_os == .windows) return;` guards prevent the dead POSIX branch from
+//! being type-checked on Windows, avoiding errors from unavailable libc symbols.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -46,7 +50,10 @@ const TickerContext = struct {
 };
 
 /// Background thread that refreshes the progress display at a fixed interval.
+/// POSIX-only: uses clock_gettime, nanosleep, and write(2).
 fn tickerThread(ctx: *TickerContext) void {
+    if (native_os == .windows) return;
+
     var latency_buf: [64]u8 = undefined;
     var msg_buf: [256]u8 = undefined;
     const req: std.c.timespec = .{ .sec = 0, .nsec = 100_000_000 }; // 100ms
@@ -69,6 +76,12 @@ fn tickerThread(ctx: *TickerContext) void {
 /// POSIX implementation — raw TCP connect
 /// ============================================================
 fn probeThreadMainPosix(ctx: *ProbeThreadContext) void {
+    if (native_os == .windows) {
+        // Never called on Windows (comptime switch in probeThreadMain),
+        // but guard prevents body from being type-checked on Windows.
+        _ = ctx.done.fetchAdd(1, .monotonic);
+        return;
+    }
     defer _ = ctx.done.fetchAdd(1, .monotonic);
 
     // Parse URL to extract host and port
@@ -270,19 +283,21 @@ pub fn probeAll(
     var done = std.atomic.Value(usize).init(0);
     var time_buf: [64]u8 = undefined;
 
-    // Capture start time
-    var start_ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &start_ts);
-    const start_ns: i96 = @as(i96, start_ts.sec) * 1_000_000_000 + start_ts.nsec;
+    // Capture start time (POSIX: clock_gettime, Windows: zero — ticker is skipped)
+    const start_ns: i96 = if (native_os == .windows) 0 else ns: {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        break :ns @as(i96, ts.sec) * 1_000_000_000 + ts.nsec;
+    };
 
-    // Spawn background ticker thread for dynamic progress display
+    // Spawn background ticker thread for dynamic progress display (POSIX only)
     var ticker_ctx: TickerContext = .{
         .total = total,
         .done = &done,
         .start_ns = start_ns,
         .stop = std.atomic.Value(bool).init(false),
     };
-    const ticker = if (progress_writer != null)
+    const ticker = if (progress_writer != null and native_os != .windows)
         std.Thread.spawn(.{}, tickerThread, .{&ticker_ctx}) catch null
     else
         null;
@@ -346,12 +361,16 @@ pub fn probeAll(
     }
 
     if (progress_writer) |pw| {
-        var end_ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &end_ts);
-        const end_ns: i96 = @as(i96, end_ts.sec) * 1_000_000_000 + end_ts.nsec;
-        const elapsed_ns: u64 = if (end_ns > start_ns) @intCast(end_ns - start_ns) else 0;
-        const elapsed_str = formatLatency(&time_buf, elapsed_ns);
-        try pw.print("\x1b[2K\r  Probing: done ({d} sources, {s})\n", .{ total, elapsed_str });
+        if (native_os == .windows) {
+            try pw.print("\x1b[2K\r  Probing: done ({d} sources)\n", .{total});
+        } else {
+            var end_ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.MONOTONIC, &end_ts);
+            const end_ns: i96 = @as(i96, end_ts.sec) * 1_000_000_000 + end_ts.nsec;
+            const elapsed_ns: u64 = if (end_ns > start_ns) @intCast(end_ns - start_ns) else 0;
+            const elapsed_str = formatLatency(&time_buf, elapsed_ns);
+            try pw.print("\x1b[2K\r  Probing: done ({d} sources, {s})\n", .{ total, elapsed_str });
+        }
         try pw.flush();
     }
 }
