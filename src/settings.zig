@@ -56,9 +56,19 @@ pub const Settings = struct {
     pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Settings {
         const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                // Create new settings file with defaults
-                var settings = default;
-                settings.path = path;
+                // Create new settings file with defaults.
+                // Dupe all string fields so deinit can safely free them all.
+                var settings = Settings{
+                    .version_map_url = try allocator.dupe(u8, default.version_map_url),
+                    .zls_vmu = try allocator.dupe(u8, default.zls_vmu),
+                    .mirror_list_url = try allocator.dupe(u8, default.mirror_list_url),
+                    .use_color = default.use_color,
+                    .always_force_install = default.always_force_install,
+                    .preferred_mirror = try allocator.dupe(u8, default.preferred_mirror),
+                    .mirror_updated_at = default.mirror_updated_at,
+                    .proxy = try allocator.dupe(u8, default.proxy),
+                    .path = path,
+                };
                 try settings.save(allocator, io);
                 return settings;
             },
