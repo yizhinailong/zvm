@@ -211,7 +211,7 @@ pub fn run(
     try stdout.print("Downloading {s}...\n", .{latest_version});
     try stdout.flush();
 
-    http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, url, archive_path, proxy) catch {
+    http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, url, archive_path, proxy, stdout) catch {
         try terminal.printError(stderr, "Failed to download update");
         std.Io.Dir.cwd().deleteFile(zvm.io, archive_path) catch {};
         return;

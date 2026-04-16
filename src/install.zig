@@ -112,11 +112,11 @@ fn installVersion(
     try stdout.flush();
 
     const actual_url = if (flags.nomirror) blk: {
-        try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, tar_url, archive_path, zvm.settings.proxy);
+        try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, tar_url, archive_path, zvm.settings.proxy, stdout);
         break :blk tar_url;
     } else blk: {
-        const mirror_url = http_client.attemptMirrorDownload(allocator, zvm.io, zvm.environ_map, zvm.settings.mirror_list_url, tar_url, archive_path, stdout, &zvm.settings) catch {
-            try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, tar_url, archive_path, zvm.settings.proxy);
+        const mirror_url = http_client.attemptMirrorDownload(allocator, zvm.io, zvm.environ_map, zvm.settings.mirror_list_url, tar_url, archive_path, stdout, stdout, &zvm.settings) catch {
+            try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, tar_url, archive_path, zvm.settings.proxy, stdout);
             break :blk tar_url;
         };
         break :blk mirror_url;
@@ -409,7 +409,7 @@ fn installZls(
     var archive_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
     const zls_archive_path = try std.fmt.bufPrint(&archive_buf, "{s}/{s}", .{ zvm.cache_dir, zls_archive_name });
 
-    try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, zls_tarball, zls_archive_path, zvm.settings.proxy);
+    try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, zls_tarball, zls_archive_path, zvm.settings.proxy, stdout);
 
     // Extract to a temporary directory
     var temp_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
