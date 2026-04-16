@@ -68,7 +68,6 @@ fn tickerThread(ctx: *TickerContext) void {
 /// ============================================================
 /// POSIX implementation — raw TCP connect
 /// ============================================================
-
 fn probeThreadMainPosix(ctx: *ProbeThreadContext) void {
     defer _ = ctx.done.fetchAdd(1, .monotonic);
 
@@ -158,7 +157,6 @@ fn probeThreadMainPosix(ctx: *ProbeThreadContext) void {
 /// ============================================================
 /// Windows fallback — std.http.Client per thread
 /// ============================================================
-
 fn configureClientProxy(
     client: *std.http.Client,
     allocator: std.mem.Allocator,
@@ -229,7 +227,6 @@ fn probeThreadMainWindows(ctx: *ProbeThreadContext) void {
 /// ============================================================
 /// Platform-dispatched probe thread entry point
 /// ============================================================
-
 fn probeThreadMain(ctx: *ProbeThreadContext) void {
     switch (native_os) {
         .windows => probeThreadMainWindows(ctx),
@@ -240,7 +237,6 @@ fn probeThreadMain(ctx: *ProbeThreadContext) void {
 /// ============================================================
 /// Public API
 /// ============================================================
-
 /// Probe all candidate URLs concurrently using real OS threads.
 pub fn probeAll(
     allocator: std.mem.Allocator,

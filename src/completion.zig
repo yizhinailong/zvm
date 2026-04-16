@@ -1,11 +1,11 @@
 //! Shell completion generation for zsh and bash.
-//! Outputs completion scripts that enable tab-completion for all zvm commands,
-//! flags, installed versions, and special values.
+//! Generates completion scripts from a single comptime metadata table derived
+//! from cli.zig definitions. The exhaustive switch on cli.Command ensures
+//! new commands trigger a compile error here until their metadata is added.
 
 const std = @import("std");
 const cli = @import("cli.zig");
 
-/// Generate and output a shell completion script for the specified shell.
 pub fn run(shell: cli.ShellType, writer: *std.Io.Writer) !void {
     switch (shell) {
         .zsh => try writeZshCompletion(writer),
@@ -14,8 +14,104 @@ pub fn run(shell: cli.ShellType, writer: *std.Io.Writer) !void {
     try writer.flush();
 }
 
-/// Generate zsh completion script.
-/// Provides completion for commands, flags, installed versions, and vmu values.
+// ─── Comptime metadata ───────────────────────────────────
+
+const Flag = struct { name: []const u8, desc: []const u8 };
+
+const ArgKind = enum {
+    none,
+    version,
+    version_rest,
+    vmu_target,
+    shell_type,
+    url,
+};
+
+const CmdMeta = struct {
+    aliases: []const []const u8 = &.{},
+    desc: []const u8,
+    flags: []const Flag = &.{},
+    arg: ArgKind = .none,
+};
+
+/// Single source of truth for command metadata.
+/// Exhaustive switch on cli.Command — adding a new command to the enum
+/// will produce a compile error until its entry is added here.
+fn cmdMeta(cmd: cli.Command) CmdMeta {
+    return switch (cmd) {
+        .install => .{
+            .aliases = &.{"i"},
+            .desc = "Install a Zig version",
+            .flags = &.{
+                .{ .name = "--force", .desc = "Force re-install" },
+                .{ .name = "-f", .desc = "Force re-install" },
+                .{ .name = "--zls", .desc = "Also install ZLS" },
+                .{ .name = "--full", .desc = "Install ZLS with full compatibility" },
+                .{ .name = "--nomirror", .desc = "Skip community mirrors" },
+            },
+            .arg = .version,
+        },
+        .use => .{
+            .desc = "Switch to an installed Zig version",
+            .flags = &.{
+                .{ .name = "--sync", .desc = "Use version from build.zig.zon" },
+            },
+            .arg = .version,
+        },
+        .list => .{
+            .aliases = &.{ "ls", "available", "remote" },
+            .desc = "List installed Zig versions",
+            .flags = &.{
+                .{ .name = "--all", .desc = "List all remote versions" },
+                .{ .name = "-a", .desc = "List all remote versions" },
+                .{ .name = "--vmu", .desc = "Show version map URLs" },
+            },
+        },
+        .uninstall => .{
+            .aliases = &.{"rm"},
+            .desc = "Remove an installed Zig version",
+            .arg = .version,
+        },
+        .clean => .{
+            .desc = "Remove build artifacts",
+        },
+        .run => .{
+            .desc = "Run a Zig version without switching default",
+            .arg = .version_rest,
+        },
+        .upgrade => .{
+            .desc = "Upgrade zvm to the latest version",
+        },
+        .vmu => .{
+            .desc = "Set version map source (zig/zls)",
+            .arg = .vmu_target,
+        },
+        .mirrorlist => .{
+            .desc = "Set mirror distribution server",
+            .arg = .url,
+        },
+        .proxy => .{
+            .desc = "Set HTTP/HTTPS proxy for downloads",
+            .arg = .url,
+        },
+        .completion => .{
+            .desc = "Generate shell completion script",
+            .arg = .shell_type,
+        },
+        .version => .{
+            .desc = "Print zvm version",
+        },
+        .help => .{
+            .desc = "Print help message",
+        },
+    };
+}
+
+/// All enum fields from cli.Command — used by inline for.
+const cmd_fields = @typeInfo(cli.Command).@"enum".fields;
+
+// ─── Zsh completion ──────────────────────────────────────
+
 fn writeZshCompletion(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\#compdef zvm
@@ -23,23 +119,19 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
         \\_zvm_completion() {
         \\  local -a commands
         \\  commands=(
-        \\    'install:Install a Zig version'
-        \\    'i:Install a Zig version'
-        \\    'use:Switch to an installed Zig version'
-        \\    'list:List installed Zig versions'
-        \\    'ls:List installed Zig versions'
-        \\    'available:List all versions available for download'
-        \\    'remote:List all versions available for download'
-        \\    'uninstall:Remove an installed Zig version'
-        \\    'rm:Remove an installed Zig version'
-        \\    'clean:Remove build artifacts'
-        \\    'run:Run a Zig version without switching default'
-        \\    'upgrade:Upgrade zvm to the latest version'
-        \\    'vmu:Set version map source (zig/zls)'
-        \\    'mirrorlist:Set mirror distribution server'
-        \\    'completion:Generate shell completion script'
-        \\    'version:Print zvm version'
-        \\    'help:Print help message'
+        \\
+    );
+
+    // Generate command entries from metadata
+    inline for (cmd_fields) |field| {
+        const meta = comptime cmdMeta(@enumFromInt(field.value));
+        try writer.print("    '{s}:{s}'\n", .{ field.name, meta.desc });
+        inline for (meta.aliases) |alias| {
+            try writer.print("    '{s}:{s}'\n", .{ alias, meta.desc });
+        }
+    }
+
+    try writer.writeAll(
         \\  )
         \\
         \\  _arguments -C \
@@ -57,48 +149,55 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
         \\      ;;
         \\    args)
         \\      case $words[1] in
-        \\        install|i)
-        \\          _arguments \
-        \\            '--force[Force re-install]' \
-        \\            '-f[Force re-install]' \
-        \\            '--zls[Also install ZLS]' \
-        \\            '--full[Install ZLS with full compatibility]' \
-        \\            '--nomirror[Skip community mirrors]' \
-        \\            '1:version:_zvm_installed_versions'
-        \\          ;;
-        \\        use)
-        \\          _arguments \
-        \\            '--sync[Use version from build.zig.zon]' \
-        \\            '1:version:_zvm_installed_versions'
-        \\          ;;
-        \\        list|ls)
-        \\          _arguments \
-        \\            '--all[List all remote versions]' \
-        \\            '-a[List all remote versions]' \
-        \\            '--vmu[Show version map URLs]'
-        \\          ;;
-        \\        uninstall|rm)
-        \\          _arguments \
-        \\            '1:version:_zvm_installed_versions'
-        \\          ;;
-        \\        run)
-        \\          _arguments \
-        \\            '1:version:_zvm_installed_versions' \
-        \\            '*::args:'
-        \\          ;;
-        \\        vmu)
-        \\          _arguments \
-        \\            '1:target:(zig zls)' \
-        \\            '2:value:_zvm_vmu_values'
-        \\          ;;
-        \\        mirrorlist)
-        \\          _arguments \
-        \\            '1:url:_zvm_mirror_values'
-        \\          ;;
-        \\        completion)
-        \\          _arguments \
-        \\            '1:shell:(zsh bash)'
-        \\          ;;
+        \\
+    );
+
+    // Generate per-command argument rules
+    inline for (cmd_fields) |field| {
+        const meta = comptime cmdMeta(@enumFromInt(field.value));
+        if (meta.flags.len == 0 and meta.arg == .none) continue;
+
+        try writer.writeAll("        ");
+        try writer.writeAll(field.name);
+        inline for (meta.aliases) |alias| {
+            try writer.writeAll("|");
+            try writer.writeAll(alias);
+        }
+        try writer.writeAll(")\n");
+
+        try writer.writeAll("          _arguments");
+        inline for (meta.flags) |flag| {
+            try writer.print(" \\\n            '{s}[{s}]'", .{ flag.name, flag.desc });
+        }
+
+        switch (meta.arg) {
+            .version => {
+                try writer.writeAll(" \\\n            '1:version:_zvm_installed_versions'\n");
+            },
+            .version_rest => {
+                try writer.writeAll(" \\\n            '1:version:_zvm_installed_versions' \\\n");
+                try writer.writeAll("            '*::args:'\n");
+            },
+            .vmu_target => {
+                try writer.writeAll(" \\\n            '1:target:(zig zls)' \\\n");
+                try writer.writeAll("            '2:value:_zvm_vmu_values'\n");
+            },
+            .shell_type => {
+                try writer.writeAll(" \\\n            '1:shell:(zsh bash)'\n");
+            },
+            .url => {
+                try writer.writeAll(" \\\n            '1:url:_zvm_url_values'\n");
+            },
+            .none => {
+                try writer.writeAll("\n");
+            },
+        }
+
+        try writer.writeAll("          ;;\n");
+    }
+
+    // Close case/esac and add helper functions
+    try writer.writeAll(
         \\      esac
         \\      ;;
         \\  esac
@@ -115,7 +214,6 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
         \\      fi
         \\    done
         \\  fi
-        \\  # Also suggest 'master' for install
         \\  if [[ $words[1] == "install" || $words[1] == "i" ]]; then
         \\    versions+=("master")
         \\  fi
@@ -132,7 +230,7 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
         \\  _describe 'value' values
         \\}
         \\
-        \\_zvm_mirror_values() {
+        \\_zvm_url_values() {
         \\  local -a values
         \\  values=("default")
         \\  _describe 'value' values
@@ -143,8 +241,8 @@ fn writeZshCompletion(writer: *std.Io.Writer) !void {
     );
 }
 
-/// Generate bash completion script.
-/// Provides completion for commands, flags, and installed versions.
+// ─── Bash completion ─────────────────────────────────────
+
 fn writeBashCompletion(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\#!/bin/bash
@@ -153,10 +251,36 @@ fn writeBashCompletion(writer: *std.Io.Writer) !void {
         \\  local cur prev words cword
         \\  _init_completion || return
         \\
-        \\  local commands="install i use list ls available remote uninstall rm clean run upgrade vmu mirrorlist completion version help"
-        \\  local install_flags="--force -f --zls --full --nomirror"
-        \\  local use_flags="--sync"
-        \\  local list_flags="--all -a --vmu"
+    );
+
+    // Build commands string from metadata
+    try writer.writeAll("  local commands=\"");
+    inline for (cmd_fields, 0..) |field, i| {
+        const meta = comptime cmdMeta(@enumFromInt(field.value));
+        if (i > 0) try writer.writeAll(" ");
+        try writer.writeAll(field.name);
+        inline for (meta.aliases) |alias| {
+            try writer.writeAll(" ");
+            try writer.writeAll(alias);
+        }
+    }
+    try writer.writeAll("\"\n");
+
+    // Build per-command flag variables
+    inline for (cmd_fields) |field| {
+        const meta = comptime cmdMeta(@enumFromInt(field.value));
+        if (meta.flags.len == 0) continue;
+
+        try writer.print("  local {s}_flags=\"", .{field.name});
+        inline for (meta.flags, 0..) |flag, i| {
+            if (i > 0) try writer.writeAll(" ");
+            try writer.writeAll(flag.name);
+        }
+        try writer.writeAll("\"\n");
+    }
+
+    // case $prev — special argument context handling
+    try writer.writeAll(
         \\
         \\  if [[ $cword -eq 1 ]]; then
         \\    COMPREPLY=($(compgen -W "$commands --color --help -h --version -v" -- "$cur"))
@@ -166,10 +290,6 @@ fn writeBashCompletion(writer: *std.Io.Writer) !void {
         \\  case $prev in
         \\    --color)
         \\      COMPREPLY=($(compgen -W "on off true false yes no" -- "$cur"))
-        \\      return
-        \\      ;;
-        \\    completion)
-        \\      COMPREPLY=($(compgen -W "zsh bash" -- "$cur"))
         \\      return
         \\      ;;
         \\    vmu)
@@ -186,38 +306,107 @@ fn writeBashCompletion(writer: *std.Io.Writer) !void {
         \\        return
         \\      fi
         \\      ;;
-        \\    mirrorlist)
-        \\      COMPREPLY=($(compgen -W "default" -- "$cur"))
-        \\      return
-        \\      ;;
+        \\
+    );
+
+    // Generate url-arg commands as a combined pattern: mirrorlist|proxy)
+    {
+        var first_url = true;
+        inline for (cmd_fields) |field| {
+            const meta = comptime cmdMeta(@enumFromInt(field.value));
+            if (meta.arg == .url) {
+                if (first_url) {
+                    try writer.writeAll("    ");
+                    first_url = false;
+                } else {
+                    try writer.writeAll("|");
+                }
+                try writer.writeAll(field.name);
+            }
+        }
+        if (!first_url) {
+            try writer.writeAll(
+                \\)
+                \\      COMPREPLY=($(compgen -W "default" -- "$cur"))
+                \\      return
+                \\      ;;
+                \\
+            );
+        }
+    }
+
+    // Generate shell_type commands: completion)
+    {
+        var first_shell = true;
+        inline for (cmd_fields) |field| {
+            const meta = comptime cmdMeta(@enumFromInt(field.value));
+            if (meta.arg == .shell_type) {
+                if (first_shell) {
+                    try writer.writeAll("    ");
+                    first_shell = false;
+                } else {
+                    try writer.writeAll("|");
+                }
+                try writer.writeAll(field.name);
+            }
+        }
+        if (!first_shell) {
+            try writer.writeAll(
+                \\)
+                \\      COMPREPLY=($(compgen -W "zsh bash" -- "$cur"))
+                \\      return
+                \\      ;;
+                \\
+            );
+        }
+    }
+
+    try writer.writeAll(
         \\  esac
         \\
         \\  local cmd=${words[1]}
         \\  case $cmd in
-        \\    install|i)
-        \\      if [[ "$cur" == --* ]]; then
-        \\        COMPREPLY=($(compgen -W "$install_flags" -- "$cur"))
-        \\      else
-        \\        _zvm_list_versions
-        \\      fi
-        \\      return
-        \\      ;;
-        \\    use)
-        \\      if [[ "$cur" == --* ]]; then
-        \\        COMPREPLY=($(compgen -W "$use_flags" -- "$cur"))
-        \\      else
-        \\        _zvm_list_versions
-        \\      fi
-        \\      return
-        \\      ;;
-        \\    list|ls|available|remote)
-        \\      COMPREPLY=($(compgen -W "$list_flags" -- "$cur"))
-        \\      return
-        \\      ;;
-        \\    uninstall|rm|run)
-        \\      _zvm_list_versions
-        \\      return
-        \\      ;;
+        \\
+    );
+
+    // Generate per-command case entries
+    inline for (cmd_fields) |field| {
+        const meta = comptime cmdMeta(@enumFromInt(field.value));
+        if (meta.flags.len == 0 and meta.arg == .none) continue;
+
+        try writer.writeAll("    ");
+        try writer.writeAll(field.name);
+        inline for (meta.aliases) |alias| {
+            try writer.writeAll("|");
+            try writer.writeAll(alias);
+        }
+        try writer.writeAll(")\n");
+
+        if (meta.flags.len > 0 and meta.arg != .none) {
+            // Commands with both flags and positional args (install, use)
+            try writer.print(
+                \\      if [[ "$cur" == --* ]]; then
+                \\        COMPREPLY=($(compgen -W "${s}_flags" -- "$cur"))
+                \\      else
+                \\        _zvm_list_versions
+                \\      fi
+                \\
+            , .{field.name});
+        } else if (meta.flags.len > 0) {
+            // Commands with only flags (list)
+            try writer.print("      COMPREPLY=($(compgen -W \"${s}_flags\" -- \"$cur\"))\n", .{field.name});
+        } else if (meta.arg == .version or meta.arg == .version_rest) {
+            // Commands with only version args (uninstall, run)
+            try writer.writeAll("      _zvm_list_versions\n");
+        } else if (meta.arg == .url) {
+            try writer.writeAll("      COMPREPLY=($(compgen -W \"default\" -- \"$cur\"))\n");
+        }
+
+        try writer.writeAll("      return\n");
+        try writer.writeAll("      ;;\n");
+    }
+
+    try writer.writeAll(
         \\  esac
         \\}
         \\
@@ -232,7 +421,6 @@ fn writeBashCompletion(writer: *std.Io.Writer) !void {
         \\      fi
         \\    done
         \\  fi
-        \\  # Also suggest 'master' for install
         \\  if [[ ${words[1]} == "install" || ${words[1]} == "i" ]]; then
         \\    versions+=("master")
         \\  fi
