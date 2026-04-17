@@ -38,7 +38,7 @@ jobs:
           version: '0.16.0'
 
       - name: Build
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+        run: zig build -Dtarget=${{ matrix.target }}
         shell: bash
 
   test:
