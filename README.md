@@ -17,6 +17,7 @@ Manage multiple Zig compiler installations, switch between versions instantly, a
 - **ZLS support** — install the Zig Language Server alongside Zig
 - **Shell completion** — tab completion for zsh and bash
 - **Self-updating** — `zvm upgrade` downloads the latest release
+- **Update notifications** — periodic checks for new versions with 24h cache
 
 ## Installation
 
@@ -119,7 +120,7 @@ zvm upgrade
 ### Global Options
 
 ```
---color=VALUE    Toggle color output (on/off/true/false)
+--color=VALUE    Toggle color output (on/off/true/false/yes/no/enabled/disabled)
 --help, -h       Print help
 --version, -v    Print version
 ```
@@ -266,9 +267,12 @@ Settings are stored in `$XDG_CONFIG_HOME/zvm/settings.json` (default: `~/.config
 | Variable | Purpose |
 |----------|---------|
 | `ZVM_PATH` | Override the data directory (legacy, takes precedence over `XDG_DATA_HOME`) |
+| `ZVM_INSTALL` | Override the directory where `zvm upgrade` installs the new binary |
 | `XDG_CONFIG_HOME` | Config directory (default: `~/.config`) |
 | `XDG_DATA_HOME` | Data directory (default: `~/.local/share`) |
 | `XDG_CACHE_HOME` | Cache directory (default: `~/.cache`) |
+| `APPDATA` | Windows: fallback config directory when `XDG_CONFIG_HOME` is unset |
+| `LOCALAPPDATA` | Windows: fallback cache directory when `XDG_CACHE_HOME` is unset |
 
 ### Migrating from `~/.zvm`
 
@@ -318,28 +322,32 @@ All available at `https://github.com/lispking/zvm/releases/latest/download/<file
 
 ```
 src/
-├── main.zig          Entry point: allocator setup, CLI dispatch
-├── cli.zig           Hand-written CLI parser with aliases and flags
-├── zvm.zig           Core ZVM struct (XDG dirs, settings, versions)
-├── settings.zig      Settings persistence (JSON load/save)
-├── errors.zig        Domain error definitions
-├── platform.zig      OS/arch detection, symlink management
-├── terminal.zig      ANSI color output helpers
-├── version_map.zig   Fetch/parse Zig & ZLS version maps
-├── http_client.zig   HTTP downloads with mirror and proxy support
-├── crypto.zig        SHA256 file verification
-├── archive.zig       Archive extraction (.tar.xz, .zip)
-├── install.zig       Install command (download, verify, extract)
-├── use.zig           Use command (switch active version)
-├── list.zig          List command (installed, remote, VMU)
-├── uninstall.zig     Uninstall command
-├── clean.zig         Clean command (remove archives)
-├── run.zig           Run command (execute specific version)
-├── upgrade.zig       Upgrade command (self-update from GitHub)
-├── vmu.zig           VMU command (version map source)
-├── mirrorlist.zig    Mirrorlist command (mirror config)
-├── proxy.zig         Proxy command (proxy config)
-└── completion.zig    Shell completion generation (zsh/bash)
+├── main.zig                    Entry point: allocator setup, CLI dispatch
+├── cli.zig                     Hand-written CLI parser with aliases and flags
+├── completion.zig              Shell completion generation (zsh/bash)
+├── core/
+│   ├── zvm.zig                 Core ZVM struct (XDG dirs, settings, versions)
+│   ├── settings.zig            Settings persistence (JSON load/save)
+│   ├── errors.zig              Domain error definitions
+│   ├── platform.zig            OS/arch detection, symlink management
+│   ├── terminal.zig            ANSI color output helpers
+│   ├── vmu.zig                 VMU command (version map source)
+│   └── update_check.zig        Periodic version check with cache
+├── command/
+│   ├── install.zig             Install command (download, verify, extract)
+│   ├── use.zig                 Use command (switch active version)
+│   ├── list.zig                List command (installed, remote, VMU)
+│   ├── uninstall.zig           Uninstall command
+│   ├── clean.zig               Clean command (remove archives)
+│   ├── run.zig                 Run command (execute specific version)
+│   ├── upgrade.zig             Upgrade command (self-update from GitHub)
+│   ├── mirrorlist.zig          Mirrorlist command (mirror config)
+│   ├── proxy.zig               Proxy command (proxy config)
+│   └── archive.zig             Archive extraction (.tar.xz, .zip)
+└── network/
+    ├── http_client.zig         HTTP downloads with mirror and proxy support
+    ├── version_map.zig         Fetch/parse Zig & ZLS version maps
+    └── mirror_probe.zig        Latency-based mirror selection
 ```
 
 This project was inspired by [tristanisham/zvm](https://github.com/tristanisham/zvm) (Go).

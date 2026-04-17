@@ -173,7 +173,7 @@ jobs:
 
             ```bash
             sudo mv zvm-*/zvm /usr/local/bin/
-            export PATH="$HOME/.zvm/bin:$PATH"
+            export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/zvm/bin:$PATH"
             ```
 
             ### Available Builds
