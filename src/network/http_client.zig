@@ -29,7 +29,7 @@ fn initClientProxy(
 }
 
 /// Parse a proxy URL string and configure the client's http_proxy/https_proxy fields.
-fn setProxyFromUrl(
+pub fn setProxyFromUrl(
     client: *std.http.Client,
     allocator: std.mem.Allocator,
     proxy_url: []const u8,

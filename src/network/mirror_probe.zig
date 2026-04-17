@@ -11,6 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
+const http_client = @import("http_client.zig");
 
 /// Per-probe timeout in seconds.
 const PROBE_TIMEOUT_S: u64 = 2;
@@ -170,40 +171,6 @@ fn probeThreadMainPosix(ctx: *ProbeThreadContext) void {
 /// ============================================================
 /// Windows fallback — std.http.Client per thread
 /// ============================================================
-fn configureClientProxy(
-    client: *std.http.Client,
-    allocator: std.mem.Allocator,
-    environ_map: *std.process.Environ.Map,
-    proxy_url: []const u8,
-) void {
-    if (proxy_url.len > 0) {
-        const uri = std.Uri.parse(proxy_url) catch
-            std.Uri.parseAfterScheme("http", proxy_url) catch return;
-        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return;
-        const raw_host = uri.getHostAlloc(allocator) catch return;
-        const authorization: ?[]const u8 = if (uri.user != null or uri.password != null) a: {
-            const auth_buf = allocator.alloc(u8, std.http.Client.basic_authorization.valueLengthFromUri(uri)) catch return;
-            std.debug.assert(std.http.Client.basic_authorization.value(uri, auth_buf).len == auth_buf.len);
-            break :a auth_buf;
-        } else null;
-        const proxy = allocator.create(std.http.Client.Proxy) catch return;
-        proxy.* = .{
-            .protocol = protocol,
-            .host = raw_host,
-            .authorization = authorization,
-            .port = uri.port orelse switch (protocol) {
-                .plain => @as(u16, 80),
-                .tls => @as(u16, 443),
-            },
-            .supports_connect = true,
-        };
-        client.http_proxy = proxy;
-        client.https_proxy = proxy;
-    } else {
-        client.initDefaultProxies(allocator, environ_map) catch {};
-    }
-}
-
 fn probeThreadMainWindows(ctx: *ProbeThreadContext) void {
     defer _ = ctx.done.fetchAdd(1, .monotonic);
 
@@ -212,7 +179,11 @@ fn probeThreadMainWindows(ctx: *ProbeThreadContext) void {
 
     var client: std.http.Client = .{ .allocator = ctx.allocator, .io = io };
     defer client.deinit();
-    configureClientProxy(&client, ctx.allocator, environ_map, ctx.proxy);
+    if (ctx.proxy.len > 0) {
+        http_client.setProxyFromUrl(&client, ctx.allocator, ctx.proxy) catch {};
+    } else {
+        client.initDefaultProxies(ctx.allocator, environ_map) catch {};
+    }
 
     const uri = std.Uri.parse(ctx.url) catch return;
     var req = client.request(.HEAD, uri, .{

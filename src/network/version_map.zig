@@ -50,17 +50,22 @@ pub fn cacheVersionMap(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try writer.interface.flush();
 }
 
-/// Get the tarball download URL for a specific version and platform.
-/// Navigates the JSON structure: map[version][platform]["tarball"].
-pub fn getTarPath(version: []const u8, platform: []const u8, map: *const VersionMap) ![]const u8 {
+/// Navigate the JSON structure: map[version][platform][field_name].
+fn getPlatformField(
+    map: *const VersionMap,
+    version: []const u8,
+    platform: []const u8,
+    field_name: []const u8,
+    missing_err: anyerror,
+) ![]const u8 {
     const version_entry = map.get(version) orelse return error.VersionNotInstalled;
     switch (version_entry) {
         .object => |obj| {
             const platform_entry = obj.get(platform) orelse return error.UnsupportedSystem;
             switch (platform_entry) {
                 .object => |plat_obj| {
-                    const tarball = plat_obj.get("tarball") orelse return error.MissingBundlePath;
-                    return tarball.string;
+                    const field = plat_obj.get(field_name) orelse return missing_err;
+                    return field.string;
                 },
                 else => return error.InvalidVersionMap,
             }
@@ -69,23 +74,14 @@ pub fn getTarPath(version: []const u8, platform: []const u8, map: *const Version
     }
 }
 
+/// Get the tarball download URL for a specific version and platform.
+pub fn getTarPath(version: []const u8, platform: []const u8, map: *const VersionMap) ![]const u8 {
+    return getPlatformField(map, version, platform, "tarball", error.MissingBundlePath);
+}
+
 /// Get the SHA256 hash for a specific version and platform.
-/// Navigates the JSON structure: map[version][platform]["shasum"].
 pub fn getVersionShasum(version: []const u8, platform: []const u8, map: *const VersionMap) ![]const u8 {
-    const version_entry = map.get(version) orelse return error.VersionNotInstalled;
-    switch (version_entry) {
-        .object => |obj| {
-            const platform_entry = obj.get(platform) orelse return error.UnsupportedSystem;
-            switch (platform_entry) {
-                .object => |plat_obj| {
-                    const shasum = plat_obj.get("shasum") orelse return error.MissingShasum;
-                    return shasum.string;
-                },
-                else => return error.InvalidVersionMap,
-            }
-        },
-        else => return error.InvalidVersionMap,
-    }
+    return getPlatformField(map, version, platform, "shasum", error.MissingShasum);
 }
 
 /// Get the master/dev build version string from the version map.

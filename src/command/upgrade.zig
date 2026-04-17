@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const zvm_mod = @import("../core/zvm.zig");
 const terminal = @import("../core/terminal.zig");
+const platform = @import("../core/platform.zig");
 const http_client = @import("../network/http_client.zig");
 
 /// GitHub Release API response structure (used for reference, parsed dynamically).
@@ -145,17 +146,9 @@ pub fn run(
     }
 
     // Detect current platform for asset matching
-    const os_name = switch (builtin.os.tag) {
-        .macos => "macos",
-        .linux => "linux",
-        .windows => "windows",
-        else => "unknown",
-    };
-    const arch_name = switch (builtin.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        else => "unknown",
-    };
+    const sys_info = platform.zigStyleSystemInfo();
+    const os_name = sys_info.os;
+    const arch_name = sys_info.arch;
 
     // Find the matching release asset for this platform
     const assets = switch (release) {
@@ -281,27 +274,10 @@ pub fn run(
     }) catch {};
 
     // Stream-copy the new binary
-    const src_file = std.Io.Dir.cwd().openFile(zvm.io, src_path, .{}) catch {
-        try terminal.printError(stderr, "Failed to read extracted binary");
-        return;
-    };
-    defer src_file.close(zvm.io);
-    const dst_file = std.Io.Dir.cwd().createFile(zvm.io, dst_path, .{}) catch {
-        try terminal.printError(stderr, "Failed to write to install directory");
-        return;
-    };
-    defer dst_file.close(zvm.io);
-
-    var src_reader_buf: [8192]u8 = undefined;
-    var src_reader = src_file.reader(zvm.io, &src_reader_buf);
-    var dst_writer_buf: [8192]u8 = undefined;
-    var dst_writer = dst_file.writer(zvm.io, &dst_writer_buf);
-
-    _ = src_reader.interface.streamRemaining(&dst_writer.interface) catch {
+    platform.copyFile(zvm.io, src_path, dst_path) catch {
         try terminal.printError(stderr, "Failed to copy binary");
         return;
     };
-    try dst_writer.interface.flush();
 
     // Make the new binary executable
     if (builtin.os.tag != .windows) {

@@ -454,19 +454,7 @@ fn installZls(
                     var dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
                     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version });
 
-                    const src_file = std.Io.Dir.cwd().openFile(zvm.io, src, .{}) catch continue;
-                    defer src_file.close(zvm.io);
-                    const dst_file = std.Io.Dir.cwd().createFile(zvm.io, dst, .{}) catch continue;
-                    defer dst_file.close(zvm.io);
-
-                    // Stream-copy the binary file
-                    var src_reader_buf: [8192]u8 = undefined;
-                    var src_reader = src_file.reader(zvm.io, &src_reader_buf);
-                    var dst_writer_buf: [8192]u8 = undefined;
-                    var dst_writer = dst_file.writer(zvm.io, &dst_writer_buf);
-
-                    _ = src_reader.interface.streamRemaining(&dst_writer.interface) catch continue;
-                    try dst_writer.interface.flush();
+                    platform.copyFile(zvm.io, src, dst) catch continue;
 
                     // Make the binary executable (Unix only, best-effort)
                     _ = std.process.run(allocator, zvm.io, .{

@@ -195,3 +195,20 @@ pub fn getCacheDir(allocator: std.mem.Allocator, environ_map: *std.process.Envir
 pub fn platformTarget(buf: []u8, info: SystemInfo) []const u8 {
     return std.fmt.bufPrint(buf, "{s}-{s}", .{ info.arch, info.os }) catch buf[0..0];
 }
+
+/// Stream-copy a file from src_path to dst_path.
+/// Opens source for reading, creates destination for writing, streams content.
+pub fn copyFile(io: std.Io, src_path: []const u8, dst_path: []const u8) !void {
+    const src_file = try std.Io.Dir.cwd().openFile(io, src_path, .{});
+    defer src_file.close(io);
+    const dst_file = try std.Io.Dir.cwd().createFile(io, dst_path, .{});
+    defer dst_file.close(io);
+
+    var src_buf: [8192]u8 = undefined;
+    var src_reader = src_file.reader(io, &src_buf);
+    var dst_buf: [8192]u8 = undefined;
+    var dst_writer = dst_file.writer(io, &dst_buf);
+
+    _ = src_reader.interface.streamRemaining(&dst_writer.interface) catch return error.CopyFailed;
+    try dst_writer.interface.flush();
+}

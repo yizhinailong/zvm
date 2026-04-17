@@ -164,52 +164,42 @@ pub const Settings = struct {
         }
     }
 
-    /// Set the Zig version map URL and persist immediately.
-    pub fn setVersionMapUrl(self: *Settings, allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
-        const old = self.version_map_url;
-        self.version_map_url = try allocator.dupe(u8, url);
+    /// Replace a string field's value, persist, and free the old value.
+    fn setStringField(self: *Settings, allocator: std.mem.Allocator, io: std.Io, comptime field: []const u8, value: []const u8) void {
+        const old = @field(self, field);
+        @field(self, field) = allocator.dupe(u8, value) catch return;
         self.save(allocator, io) catch {};
         allocator.free(old);
+    }
+
+    /// Set the Zig version map URL and persist immediately.
+    pub fn setVersionMapUrl(self: *Settings, allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
+        self.setStringField(allocator, io, "version_map_url", url);
     }
 
     /// Set the ZLS version map URL and persist immediately.
     pub fn setZlsVMU(self: *Settings, allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
-        const old = self.zls_vmu;
-        self.zls_vmu = try allocator.dupe(u8, url);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "zls_vmu", url);
     }
 
     /// Set the mirror list URL and persist immediately.
     pub fn setMirrorListUrl(self: *Settings, allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
-        const old = self.mirror_list_url;
-        self.mirror_list_url = try allocator.dupe(u8, url);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "mirror_list_url", url);
     }
 
     /// Reset the Zig version map URL to the official default.
     pub fn resetVersionMap(self: *Settings, allocator: std.mem.Allocator, io: std.Io) !void {
-        const old = self.version_map_url;
-        self.version_map_url = try allocator.dupe(u8, default.version_map_url);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "version_map_url", default.version_map_url);
     }
 
     /// Reset the ZLS version map URL to the official default.
     pub fn resetZlsVMU(self: *Settings, allocator: std.mem.Allocator, io: std.Io) !void {
-        const old = self.zls_vmu;
-        self.zls_vmu = try allocator.dupe(u8, default.zls_vmu);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "zls_vmu", default.zls_vmu);
     }
 
     /// Reset the mirror list URL to the official default.
     pub fn resetMirrorList(self: *Settings, allocator: std.mem.Allocator, io: std.Io) !void {
-        const old = self.mirror_list_url;
-        self.mirror_list_url = try allocator.dupe(u8, default.mirror_list_url);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "mirror_list_url", default.mirror_list_url);
     }
 
     /// Toggle colored output on/off and persist.
@@ -220,10 +210,7 @@ pub const Settings = struct {
 
     /// Set the proxy URL and persist immediately.
     pub fn setProxy(self: *Settings, allocator: std.mem.Allocator, io: std.Io, url: []const u8) !void {
-        const old = self.proxy;
-        self.proxy = try allocator.dupe(u8, url);
-        self.save(allocator, io) catch {};
-        allocator.free(old);
+        self.setStringField(allocator, io, "proxy", url);
     }
 
     /// Update the cached preferred mirror and persist immediately.

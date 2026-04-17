@@ -19,6 +19,13 @@ fn fullVersion() []const u8 {
     return "v" ++ VERSION ++ " (" ++ build_options.git_commit ++ ")";
 }
 
+/// Print error and exit on command failure.
+fn commandFail(stderr: *std.Io.Writer, err: anyerror) noreturn {
+    terminal.printError(stderr, @errorName(err)) catch {};
+    stderr.flush() catch {};
+    std.process.exit(1);
+}
+
 /// Application entry point.
 /// Receives std.process.Init from the Zig runtime which provides
 /// pre-initialized allocator, I/O context, and environment map.
@@ -72,11 +79,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .install => |inst| {
             const install = @import("command/install.zig");
-            install.run(&zvm, allocator, inst.version, inst.flags, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            install.run(&zvm, allocator, inst.version, inst.flags, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .use => |use_cmd| {
             const use_mod = @import("command/use.zig");
@@ -85,83 +88,43 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.flush();
                 std.process.exit(1);
             };
-            use_mod.run(&zvm, allocator, ver, use_cmd.flags, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            use_mod.run(&zvm, allocator, ver, use_cmd.flags, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .list => |list_cmd| {
             const list = @import("command/list.zig");
-            list.run(&zvm, allocator, list_cmd.flags, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            list.run(&zvm, allocator, list_cmd.flags, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .uninstall => |uninst| {
             const uninstall = @import("command/uninstall.zig");
-            uninstall.run(&zvm, allocator, uninst.version, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            uninstall.run(&zvm, allocator, uninst.version, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .clean => {
             const clean = @import("command/clean.zig");
-            clean.run(&zvm, allocator, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            clean.run(&zvm, allocator, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .run => |run_cmd| {
             const run_mod = @import("command/run.zig");
-            run_mod.run(&zvm, allocator, run_cmd.version, run_cmd.args, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            run_mod.run(&zvm, allocator, run_cmd.version, run_cmd.args, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .upgrade => {
             const upgrade = @import("command/upgrade.zig");
-            upgrade.run(&zvm, allocator, VERSION, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            upgrade.run(&zvm, allocator, VERSION, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .vmu => |vmu_cmd| {
             const vmu = @import("core/vmu.zig");
-            vmu.run(&zvm, allocator, vmu_cmd.target, vmu_cmd.value, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            vmu.run(&zvm, allocator, vmu_cmd.target, vmu_cmd.value, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .mirrorlist => |ml_cmd| {
             const mirrorlist = @import("command/mirrorlist.zig");
-            mirrorlist.run(&zvm, allocator, ml_cmd.url, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            mirrorlist.run(&zvm, allocator, ml_cmd.url, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .proxy => |proxy_cmd| {
             const proxy_mod = @import("command/proxy.zig");
-            proxy_mod.run(&zvm, allocator, proxy_cmd.url, stdout, stderr) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            proxy_mod.run(&zvm, allocator, proxy_cmd.url, stdout, stderr) catch |err| commandFail(stderr, err);
         },
         .completion => |comp_cmd| {
             const completion = @import("completion.zig");
-            completion.run(comp_cmd.shell, stdout) catch |err| {
-                try terminal.printError(stderr, @errorName(err));
-                try stderr.flush();
-                std.process.exit(1);
-            };
+            completion.run(comp_cmd.shell, stdout) catch |err| commandFail(stderr, err);
         },
     }
 }
