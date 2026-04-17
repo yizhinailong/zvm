@@ -9,39 +9,7 @@ const zvm_mod = @import("../core/zvm.zig");
 const terminal = @import("../core/terminal.zig");
 const platform = @import("../core/platform.zig");
 const http_client = @import("../network/http_client.zig");
-
-/// GitHub Release API response structure (used for reference, parsed dynamically).
-const GithubRelease = struct {
-    tag_name: []const u8,
-    assets: []const Asset,
-
-    const Asset = struct {
-        name: []const u8,
-        browser_download_url: []const u8,
-    };
-};
-
-/// Compare two semver version strings (without 'v' prefix).
-/// Returns true if a > b.
-fn versionGt(a: []const u8, b: []const u8) bool {
-    var a_iter = std.mem.splitScalar(u8, a, '.');
-    var b_iter = std.mem.splitScalar(u8, b, '.');
-    while (true) {
-        const a_part = a_iter.next();
-        const b_part = b_iter.next();
-        if (a_part == null and b_part == null) return false;
-        const a_val: u64 = if (a_part) |p| std.fmt.parseInt(u64, p, 10) catch 0 else 0;
-        const b_val: u64 = if (b_part) |p| std.fmt.parseInt(u64, p, 10) catch 0 else 0;
-        if (a_val > b_val) return true;
-        if (a_val < b_val) return false;
-    }
-}
-
-/// Strip leading 'v' from a version string if present.
-fn stripVPrefix(version: []const u8) []const u8 {
-    if (version.len > 0 and version[0] == 'v') return version[1..];
-    return version;
-}
+const update_check = @import("../core/update_check.zig");
 
 /// Search for the extracted binary inside self_dir, including subdirectories.
 /// The archive may extract into a versioned directory like zvm-v0.1.1-aarch64-macos/.
@@ -81,7 +49,7 @@ pub fn run(
     try stdout.print("Checking for zvm updates...\n", .{});
     try stdout.flush();
 
-    // Fetch latest release info from GitHub API
+    // Fetch latest release info from GitHub API (single request)
     const proxy = zvm.settings.proxy;
     const release_json = http_client.downloadToMemoryWithProxy(allocator, zvm.io, zvm.environ_map, "https://api.github.com/repos/lispking/zvm/releases/latest", proxy) catch {
         try terminal.printError(stderr, "Failed to check for updates");
@@ -97,49 +65,21 @@ pub fn run(
     };
     defer parsed.deinit();
 
-    // Extract version info from release.
-    // The "latest" release has tag_name="latest" (not a real version),
-    // so we extract the actual version from the body: "Latest stable release (vX.Y.Z)."
     const release = parsed.value;
-    const release_obj = switch (release) {
-        .object => |obj| obj,
-        else => {
-            try terminal.printError(stderr, "Invalid release response");
-            return;
-        },
-    };
 
-    var latest_version: []const u8 = "unknown";
-    // Try to extract version from body: "Latest stable release (vX.Y.Z)."
-    if (release_obj.get("body")) |body_val| {
-        if (body_val == .string) {
-            const body = body_val.string;
-            if (std.mem.indexOf(u8, body, "(")) |open| {
-                if (std.mem.indexOf(u8, body[open..], ")")) |close| {
-                    latest_version = body[open + 1 .. open + close];
-                }
-            }
-        }
-    }
-    // Fallback to tag_name if body parsing failed and tag_name looks like a version
-    if (std.mem.eql(u8, latest_version, "unknown")) {
-        if (release_obj.get("tag_name")) |tag| {
-            if (tag == .string) {
-                const t = tag.string;
-                if (t.len > 0 and t[0] == 'v') {
-                    latest_version = t;
-                }
-            }
-        }
-    }
+    // Extract version from release JSON (reuses shared logic)
+    const latest_version = update_check.extractVersionFromRelease(release) orelse {
+        try terminal.printError(stderr, "Invalid release response");
+        return;
+    };
 
     try stdout.print("Latest version: {s}\n", .{latest_version});
     try stdout.flush();
 
     // Compare versions and skip download if already up-to-date
-    const current_stripped = stripVPrefix(current_version);
-    const latest_stripped = stripVPrefix(latest_version);
-    if (!versionGt(latest_stripped, current_stripped)) {
+    const current_stripped = update_check.stripVPrefix(current_version);
+    const latest_stripped = update_check.stripVPrefix(latest_version);
+    if (!update_check.versionGt(latest_stripped, current_stripped)) {
         try terminal.printSuccess(stdout, "Already up-to-date!");
         try stdout.flush();
         return;

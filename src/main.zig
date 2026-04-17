@@ -7,6 +7,7 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const zvm_mod = @import("core/zvm.zig");
 const terminal = @import("core/terminal.zig");
+const update_check = @import("core/update_check.zig");
 const errors = @import("core/errors.zig");
 const platform = @import("core/platform.zig");
 const build_options = @import("build_options");
@@ -80,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
         .install => |inst| {
             const install = @import("command/install.zig");
             install.run(&zvm, allocator, inst.version, inst.flags, stdout, stderr) catch |err| commandFail(stderr, err);
+            update_check.printUpdateHint(allocator, zvm.io, zvm.environ_map, zvm.cache_dir, zvm.settings.proxy, stdout);
         },
         .use => |use_cmd| {
             const use_mod = @import("command/use.zig");
@@ -117,6 +119,7 @@ pub fn main(init: std.process.Init) !void {
         .mirrorlist => |ml_cmd| {
             const mirrorlist = @import("command/mirrorlist.zig");
             mirrorlist.run(&zvm, allocator, ml_cmd.url, stdout, stderr) catch |err| commandFail(stderr, err);
+            update_check.printUpdateHint(allocator, zvm.io, zvm.environ_map, zvm.cache_dir, zvm.settings.proxy, stdout);
         },
         .proxy => |proxy_cmd| {
             const proxy_mod = @import("command/proxy.zig");
