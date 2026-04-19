@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const http_client = @import("http_client.zig");
+const proxy_tunnel = @import("proxy_tunnel.zig");
 
 /// Per-probe timeout in seconds.
 const PROBE_TIMEOUT_S: u64 = 2;
@@ -180,7 +181,7 @@ fn probeThreadMainWindows(ctx: *ProbeThreadContext) void {
     var client: std.http.Client = .{ .allocator = ctx.allocator, .io = io };
     defer client.deinit();
     if (ctx.proxy.len > 0) {
-        http_client.setProxyFromUrl(&client, ctx.allocator, ctx.proxy) catch {};
+        proxy_tunnel.setProxyFromUrl(&client, ctx.allocator, ctx.proxy) catch {};
     } else {
         client.initDefaultProxies(ctx.allocator, environ_map) catch {};
     }
