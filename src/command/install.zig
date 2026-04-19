@@ -133,9 +133,27 @@ fn installVersion(
         };
 
         if (!matches) {
-            console.err("SHA256 checksum mismatch!", .{});
-            std.Io.Dir.cwd().deleteFile(zvm.io, archive_path) catch {};
-            return error.ShasumMismatch;
+            // Mirror tarball may have a different shasum than the official source.
+            // Fallback to the original URL and re-verify.
+            if (actual_url.ptr != tar_url.ptr) {
+                console.warn("Mirror checksum mismatch, falling back to official source...", .{});
+                std.Io.Dir.cwd().deleteFile(zvm.io, archive_path) catch {};
+                try http_client.downloadToFileWithProxy(allocator, zvm.io, zvm.environ_map, tar_url, archive_path, zvm.settings.proxy, stdout);
+
+                const fallback_matches = crypto.verifyFileSha256(zvm.io, archive_path, expected) catch {
+                    console.err("Failed to verify checksum", .{});
+                    return error.ShasumMismatch;
+                };
+                if (!fallback_matches) {
+                    console.err("SHA256 checksum mismatch!", .{});
+                    std.Io.Dir.cwd().deleteFile(zvm.io, archive_path) catch {};
+                    return error.ShasumMismatch;
+                }
+            } else {
+                console.err("SHA256 checksum mismatch!", .{});
+                std.Io.Dir.cwd().deleteFile(zvm.io, archive_path) catch {};
+                return error.ShasumMismatch;
+            }
         }
         console.success("Checksum verified.", .{});
     }
