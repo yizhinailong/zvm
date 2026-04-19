@@ -179,6 +179,44 @@ pub const ProxyTunnel = struct {
         return self;
     }
 
+    /// Send an HTTP GET request over the TLS tunnel.
+    pub fn sendHttpGet(self: *ProxyTunnel, target_uri: std.Uri) !void {
+        var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+        const target_host = try target_uri.getHost(&host_buf);
+
+        var path_buf: [4096]u8 = undefined;
+        const request_path = try buildRequestPath(target_uri, &path_buf);
+
+        var req_buf: [4096]u8 = undefined;
+        var req_writer: std.Io.Writer = .fixed(&req_buf);
+        req_writer.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: zvm\r\nConnection: close\r\n\r\n", .{ request_path, target_host.bytes }) catch return error.DownloadFailed;
+        self.tls_client.writer.writeAll(req_writer.buffered()) catch return error.DownloadFailed;
+        self.tls_client.writer.flush() catch return error.DownloadFailed;
+        self.stream_writer.interface.flush() catch return error.DownloadFailed;
+    }
+
+    /// Read the HTTP response status line and return the numeric status code.
+    pub fn readHttpStatus(self: *ProxyTunnel) !u16 {
+        const first_line = self.tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
+        if (first_line.len < 12 or !std.mem.startsWith(u8, first_line, "HTTP/1.1 ")) return error.DownloadFailed;
+        return std.fmt.parseInt(u16, first_line[9..12], 10) catch return error.DownloadFailed;
+    }
+
+    /// Read and discard response headers until the blank line.
+    /// Returns the Content-Length value if present.
+    pub fn skipHeaders(self: *ProxyTunnel) !?u64 {
+        var content_length: ?u64 = null;
+        while (true) {
+            const line = self.tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
+            if (line.len == 0 or (line.len == 1 and line[0] == '\r')) break;
+            if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
+                const val = std.mem.trim(u8, line["content-length:".len..], " \r");
+                content_length = std.fmt.parseInt(u64, val, 10) catch null;
+            }
+        }
+        return content_length;
+    }
+
     /// Close the underlying stream and free the tunnel memory.
     pub fn destroy(self: *ProxyTunnel, allocator: std.mem.Allocator, io: std.Io) void {
         self.stream.close(io);

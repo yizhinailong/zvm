@@ -90,40 +90,7 @@ pub fn downloadToFileWithProxy(
     const body_reader = response.reader(&reader_buf);
 
     if (progress_writer) |pw| {
-        // Download with progress display
-        const chunk_limit: std.Io.Limit = .limited(64 * 1024);
-        var downloaded: u64 = 0;
-        const start_ns = std.Io.Timestamp.now(io, .awake);
-        var last_update_ns: u64 = 0;
-
-        while (true) {
-            const n = body_reader.stream(&file_writer.interface, chunk_limit) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => |e| {
-                    if (err == error.ReadFailed) {
-                        if (response.bodyErr()) |be| return be;
-                    }
-                    return e;
-                },
-            };
-            downloaded += n;
-
-            // Update progress at most ~10 times per second
-            const now_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
-            if (now_ns - last_update_ns > 100_000_000 or (total != null and downloaded >= total.?)) {
-                last_update_ns = now_ns;
-                printProgress(pw, io, downloaded, total, start_ns) catch {};
-            }
-        }
-        try file_writer.interface.flush();
-
-        // Final progress update and newline
-        const final_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
-        if (final_ns > 0) {
-            printProgress(pw, io, downloaded, total, start_ns) catch {};
-            try pw.writeByte('\n');
-            try pw.flush();
-        }
+        try streamBodyToFile(body_reader, &file_writer.interface, io, total, pw, .limited(64 * 1024));
     } else {
         // Download without progress (original behavior)
         _ = body_reader.streamRemaining(&file_writer.interface) catch |err| switch (err) {
@@ -169,6 +136,62 @@ fn printProgress(
     try writer.flush();
 }
 
+/// Stream response body from a reader to a file writer.
+/// Handles both progress display (if progress_writer is non-null) and
+/// plain streaming without progress.
+fn streamBodyToFile(
+    body_reader: *std.Io.Reader,
+    file_writer: *std.Io.Writer,
+    io: std.Io,
+    total: ?u64,
+    progress_writer: ?*std.Io.Writer,
+    chunk_limit: std.Io.Limit,
+) !void {
+    if (progress_writer) |pw| {
+        var downloaded: u64 = 0;
+        const start_ns = std.Io.Timestamp.now(io, .awake);
+        var last_update_ns: u64 = 0;
+
+        while (true) {
+            const n = body_reader.stream(file_writer, chunk_limit) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (n == 0) {
+                try file_writer.flush();
+                continue;
+            }
+            downloaded += n;
+
+            const now_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
+            if (now_ns - last_update_ns > 100_000_000 or (total != null and downloaded >= total.?)) {
+                last_update_ns = now_ns;
+                printProgress(pw, io, downloaded, total, start_ns) catch {};
+            }
+        }
+        try file_writer.flush();
+
+        const final_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
+        if (final_ns > 0) {
+            printProgress(pw, io, downloaded, total, start_ns) catch {};
+            try pw.writeByte('\n');
+            try pw.flush();
+        }
+    } else {
+        while (true) {
+            const n = body_reader.stream(file_writer, chunk_limit) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (n == 0) {
+                try file_writer.flush();
+                continue;
+            }
+        }
+        try file_writer.flush();
+    }
+}
+
 /// Download content from a URL over HTTPS through a CONNECT proxy tunnel.
 /// Reuses a single reader/writer pair throughout to avoid losing buffered data.
 fn downloadViaProxyTunnel(
@@ -181,43 +204,18 @@ fn downloadViaProxyTunnel(
     const tunnel = try proxy_tunnel.ProxyTunnel.create(allocator, io, target_uri, proxy_host, proxy_port);
     defer tunnel.destroy(allocator, io);
 
-    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const target_host = try target_uri.getHost(&host_buf);
+    try tunnel.sendHttpGet(target_uri);
+    const status = try tunnel.readHttpStatus();
+    if (status != 200) return error.DownloadFailed;
+    _ = try tunnel.skipHeaders();
 
-    var path_buf: [4096]u8 = undefined;
-    const request_path = try proxy_tunnel.buildRequestPath(target_uri, &path_buf);
-
-    // Send HTTP GET request over TLS
-    var req_buf: [4096]u8 = undefined;
-    var req_writer: std.Io.Writer = .fixed(&req_buf);
-    req_writer.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: zvm\r\nConnection: close\r\n\r\n", .{ request_path, target_host.bytes }) catch return error.DownloadFailed;
-    tunnel.tls_client.writer.writeAll(req_writer.buffered()) catch return error.DownloadFailed;
-    tunnel.tls_client.writer.flush() catch return error.DownloadFailed;
-    tunnel.stream_writer.interface.flush() catch return error.DownloadFailed;
-
-    // Read response via TLS
     const resp_buf = allocator.alloc(u8, 10 * 1024 * 1024) catch return error.DownloadFailed;
     defer allocator.free(resp_buf);
     var resp_writer: std.Io.Writer = .fixed(resp_buf);
     _ = tunnel.tls_client.reader.streamRemaining(&resp_writer) catch |err| {
         if (err != error.EndOfStream) return error.DownloadFailed;
     };
-    const resp_data = resp_writer.buffered();
-
-    // Parse HTTP response
-    const header_end = std.mem.indexOf(u8, resp_data, "\r\n\r\n") orelse {
-        return error.DownloadFailed;
-    };
-    const header_slice = resp_data[0..header_end];
-    const body_start = header_end + 4;
-
-    const first_line = std.mem.sliceTo(header_slice, '\r');
-    if (first_line.len < 12 or !std.mem.startsWith(u8, first_line, "HTTP/1.1 "))
-        return error.DownloadFailed;
-    if (!std.mem.eql(u8, first_line[9..12], "200")) return error.DownloadFailed;
-
-    const result = resp_data[body_start..];
-    return allocator.dupe(u8, result);
+    return allocator.dupe(u8, resp_writer.buffered());
 }
 
 /// Download a file from a URL over HTTPS through a CONNECT proxy tunnel.
@@ -234,82 +232,17 @@ fn downloadFileViaProxyTunnel(
     const tunnel = try proxy_tunnel.ProxyTunnel.create(allocator, io, target_uri, proxy_host, proxy_port);
     defer tunnel.destroy(allocator, io);
 
-    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const target_host = try target_uri.getHost(&host_buf);
-
-    var path_buf: [4096]u8 = undefined;
-    const request_path = try proxy_tunnel.buildRequestPath(target_uri, &path_buf);
-
-    var req_buf: [4096]u8 = undefined;
-    var req_writer: std.Io.Writer = .fixed(&req_buf);
-    req_writer.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: zvm\r\nConnection: close\r\n\r\n", .{ request_path, target_host.bytes }) catch return error.DownloadFailed;
-    tunnel.tls_client.writer.writeAll(req_writer.buffered()) catch return error.DownloadFailed;
-    tunnel.tls_client.writer.flush() catch return error.DownloadFailed;
-    tunnel.stream_writer.interface.flush() catch return error.DownloadFailed;
-
-    // Read HTTP response headers
-    const first_line = tunnel.tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
-    if (first_line.len < 12 or !std.mem.startsWith(u8, first_line, "HTTP/1.1 ")) return error.DownloadFailed;
-    if (!std.mem.eql(u8, first_line[9..12], "200")) return error.DownloadFailed;
-
-    var content_length: ?u64 = null;
-    while (true) {
-        const line = tunnel.tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
-        if (line.len == 0 or (line.len == 1 and line[0] == '\r')) break;
-        if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
-            const val = std.mem.trim(u8, line["content-length:".len..], " \r");
-            content_length = std.fmt.parseInt(u64, val, 10) catch null;
-        }
-    }
+    try tunnel.sendHttpGet(target_uri);
+    const status = try tunnel.readHttpStatus();
+    if (status != 200) return error.DownloadFailed;
+    const content_length = try tunnel.skipHeaders();
 
     const file = try std.Io.Dir.cwd().createFile(io, dest_path, .{});
     defer file.close(io);
     var file_buf: [16384]u8 = undefined;
     var file_writer = file.writer(io, &file_buf);
 
-    if (progress_writer) |pw| {
-        var downloaded: u64 = 0;
-        const start_ns = std.Io.Timestamp.now(io, .awake);
-        var last_update_ns: u64 = 0;
-
-        while (true) {
-            const n = tunnel.tls_client.reader.stream(&file_writer.interface, .unlimited) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return error.DownloadFailed,
-            };
-            if (n == 0) {
-                try file_writer.interface.flush();
-                continue;
-            }
-            downloaded += n;
-
-            const now_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
-            if (now_ns - last_update_ns > 100_000_000 or (content_length != null and downloaded >= content_length.?)) {
-                last_update_ns = now_ns;
-                printProgress(pw, io, downloaded, content_length, start_ns) catch {};
-            }
-        }
-        try file_writer.interface.flush();
-
-        const final_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
-        if (final_ns > 0) {
-            printProgress(pw, io, downloaded, content_length, start_ns) catch {};
-            try pw.writeByte('\n');
-            try pw.flush();
-        }
-    } else {
-        while (true) {
-            const n = tunnel.tls_client.reader.stream(&file_writer.interface, .unlimited) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return error.DownloadFailed,
-            };
-            if (n == 0) {
-                try file_writer.interface.flush();
-                continue;
-            }
-        }
-        try file_writer.interface.flush();
-    }
+    try streamBodyToFile(&tunnel.tls_client.reader, &file_writer.interface, io, content_length, progress_writer, .unlimited);
 }
 
 /// Download content from a URL into memory.
