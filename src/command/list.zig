@@ -8,6 +8,7 @@ const std = @import("std");
 const zvm_mod = @import("../core/zvm.zig");
 const Console = @import("../core/Console.zig");
 const version_map = @import("../network/version_map.zig");
+const http_client = @import("../network/http_client.zig");
 
 pub const ListFlags = @import("../cli.zig").ListFlags;
 
@@ -70,7 +71,7 @@ pub fn run(
 }
 
 /// Fetch and display all remote versions from the version map.
-/// Shows version name and installation status (installed/active).
+/// Shows version name, installation status, and remote ZLS availability.
 fn listRemote(
     zvm: *zvm_mod.ZVM,
     allocator: std.mem.Allocator,
@@ -85,6 +86,10 @@ fn listRemote(
     defer parsed.deinit();
 
     const vmap = &parsed.value.object;
+
+    // Fetch ZLS index to check remote ZLS availability per version
+    const zls_index = fetchZlsIndex(allocator, zvm.io, zvm.environ_map, zvm.settings.proxy) catch null;
+    defer if (zls_index) |zi| zi.deinit();
 
     // Get installed versions for marking status
     var installed = try zvm.getInstalledVersions(allocator);
@@ -104,8 +109,10 @@ fn listRemote(
     }
 
     // Print table header
-    console.println(.stdout, "{s:<30} {s:<12}", .{ "Version", "Installed" });
-    console.println(.stdout, "{s:<30} {s:<12}", .{ "-------", "---------" });
+    console.print(.stdout, "{s:<30} {s:<12} {s:<6}", .{ "Version", "Installed", "ZLS" });
+    console.newline(.stdout);
+    console.print(.stdout, "{s:<30} {s:<12} {s:<6}", .{ "-------", "---------", "---" });
+    console.newline(.stdout);
 
     // Print master version first (with its dev build version number)
     if (vmap.get("master")) |master| {
@@ -113,44 +120,88 @@ fn listRemote(
             .object => |obj| if (obj.get("version")) |v| v.string else "?",
             else => "?",
         };
-        const is_installed = isInstalled(installed.items, "master");
-        const is_active = if (active) |a| std.mem.eql(u8, a, "master") else false;
-        const status = if (is_active) "active" else if (is_installed) "yes" else "";
-        console.print(.stdout, "master ({s})", .{master_ver});
-        if (status.len > 0) {
-            if (is_active) {
-                console.colorize(.stdout, .green, "  {s}", .{status});
-            } else {
-                console.println(.stdout, "  {s}", .{status});
-            }
-        } else {
-            console.newline(.stdout);
-        }
+        var master_buf: [128]u8 = undefined;
+        const master_display = std.fmt.bufPrint(&master_buf, "master ({s})", .{master_ver}) catch "master";
+        printVersionRow(console, installed.items, active, "master", master_display, false);
     }
 
     // Print all tagged release versions
     for (keys.items) |key| {
         if (std.mem.eql(u8, key, "master")) continue;
-        const is_installed = isInstalled(installed.items, key);
-        const is_active_flag = if (active) |a| std.mem.eql(u8, a, key) else false;
-        const status = if (is_active_flag) "active" else if (is_installed) "yes" else "";
-        console.print(.stdout, "{s}", .{key});
-        if (status.len > 0) {
-            if (is_active_flag) {
-                console.colorize(.stdout, .green, "  {s}", .{status});
-            } else {
-                console.print(.stdout, "  {s}", .{status});
-            }
-        }
-        console.newline(.stdout);
+        const zls_ok = hasRemoteZls(zls_index, key);
+        printVersionRow(console, installed.items, active, key, key, zls_ok);
     }
     console.flush(.stdout);
 }
 
-/// Check if a version exists in the installed versions list.
-fn isInstalled(installed: []const []const u8, version: []const u8) bool {
-    for (installed) |inst| {
-        if (std.mem.eql(u8, inst, version)) return true;
+/// Fetch ZLS index from builds.zigtools.org.
+/// Returns parsed JSON with version keys (e.g. "0.16.0", "0.15.1").
+fn fetchZlsIndex(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *std.process.Environ.Map,
+    proxy: []const u8,
+) !std.json.Parsed(std.json.Value) {
+    const json_bytes = try http_client.downloadToMemoryWithProxy(
+        allocator,
+        io,
+        environ_map,
+        "https://builds.zigtools.org/index.json",
+        proxy,
+    );
+    defer allocator.free(json_bytes);
+
+    return try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{
+        .ignore_unknown_fields = true,
+    });
+}
+
+/// Check if a Zig version has a corresponding ZLS release in the remote index.
+fn hasRemoteZls(zls_index: ?std.json.Parsed(std.json.Value), version: []const u8) bool {
+    const idx = zls_index orelse return false;
+    return switch (idx.value) {
+        .object => |obj| obj.get(version) != null,
+        else => false,
+    };
+}
+
+/// Print a single version row with installed status and ZLS column.
+fn printVersionRow(
+    console: Console,
+    installed: []const []const u8,
+    active: ?[]const u8,
+    key: []const u8,
+    display: []const u8,
+    zls_ok: bool,
+) void {
+    const is_installed = for (installed) |inst| {
+        if (std.mem.eql(u8, inst, key)) break true;
+    } else false;
+    const is_active = if (active) |a| std.mem.eql(u8, a, key) else false;
+
+    // Column 1: Version
+    console.print(.stdout, "{s:<30}", .{display});
+
+    // Column 2: Installed status
+    if (is_active) {
+        console.colorize(.stdout, .green, "active", .{});
+        console.print(.stdout, "      ", .{});
+    } else if (is_installed) {
+        console.print(.stdout, "yes         ", .{});
+    } else {
+        console.print(.stdout, "-           ", .{});
     }
-    return false;
+
+    // Column 3: ZLS availability
+    if (zls_ok) {
+        if (is_active) {
+            console.colorize(.stdout, .green, "yes", .{});
+        } else {
+            console.print(.stdout, "yes", .{});
+        }
+    } else {
+        console.print(.stdout, "-", .{});
+    }
+
+    console.newline(.stdout);
 }

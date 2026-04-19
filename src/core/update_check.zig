@@ -99,7 +99,7 @@ pub fn fetchLatestVersion(
 }
 
 /// Read the cached latest version and check timestamp.
-/// Returns the cached version string (slice into `content_buf`) if valid, null otherwise.
+/// Returns an owned copy of the cached version string if valid, null otherwise.
 fn readCache(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8) ?[]const u8 {
     const file = std.Io.Dir.cwd().openFile(io, cache_path, .{}) catch return null;
     defer file.close(io);
@@ -107,6 +107,7 @@ fn readCache(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8) ?
     var read_buf: [256]u8 = undefined;
     var reader = file.reader(io, &read_buf);
     const content = reader.interface.allocRemaining(allocator, .limited(256)) catch return null;
+    defer allocator.free(content);
 
     // Format: "<timestamp>\n<version>"
     const newline = std.mem.indexOfScalar(u8, content, '\n') orelse return null;
@@ -118,7 +119,7 @@ fn readCache(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8) ?
     const now = std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
     if (now - timestamp > check_interval_secs) return null;
 
-    return cached_version;
+    return allocator.dupe(u8, cached_version) catch null;
 }
 
 /// Write the latest version and current timestamp to the cache file.
@@ -148,9 +149,8 @@ pub fn checkForUpdate(
     const cache_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ cache_dir, cache_filename }) catch return null;
 
     // Try reading from cache first
-    var content_buf: [256]u8 = undefined;
-    _ = &content_buf;
     if (readCache(allocator, io, cache_path)) |cached_version| {
+        defer allocator.free(cached_version);
         const current = stripVPrefix(VERSION);
         const latest = stripVPrefix(cached_version);
         if (versionGt(latest, current)) {

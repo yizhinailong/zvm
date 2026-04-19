@@ -374,29 +374,30 @@ fn installZls(
     var plat_buf: [128]u8 = undefined;
     const target = platform.platformTarget(&plat_buf, sys_info);
 
-    var tarball_url: ?[]const u8 = null;
-    var outer_iter = zls_data.iterator();
-    while (outer_iter.next()) |entry| {
-        switch (entry.value_ptr.*) {
-            .object => |obj| {
-                const plat_entry = obj.get(target) orelse continue;
-                switch (plat_entry) {
-                    .object => |plat_obj| {
-                        if (plat_obj.get("tarball")) |tb| {
-                            tarball_url = tb.string;
-                            break;
-                        }
-                    },
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-
-    const zls_tarball = tarball_url orelse {
+    const plat_entry = zls_data.get(target) orelse {
         console.err("No ZLS build found for your platform", .{});
         return;
+    };
+
+    const plat_obj = switch (plat_entry) {
+        .object => |obj| obj,
+        else => {
+            console.err("Invalid ZLS platform entry", .{});
+            return;
+        },
+    };
+
+    const tarball_val = plat_obj.get("tarball") orelse {
+        console.err("No tarball URL in ZLS response", .{});
+        return;
+    };
+
+    const zls_tarball = switch (tarball_val) {
+        .string => |s| s,
+        else => {
+            console.err("Invalid tarball URL format", .{});
+            return;
+        },
     };
 
     // Download ZLS archive
@@ -417,12 +418,33 @@ fn installZls(
         return;
     };
 
-    // Find the zls binary in the extracted directory and copy it to the version dir
+    // Find the zls binary in the extracted directory and copy it to the version dir.
+    // ZLS archives may have a flat layout (zls at root) or a nested one (dir/zls).
     var temp_handle = std.Io.Dir.cwd().openDir(zvm.io, temp_dir, .{ .iterate = true }) catch return;
     defer temp_handle.close(zvm.io);
 
+    var found = false;
     var iter = temp_handle.iterate();
     while (try iter.next(zvm.io)) |entry| {
+        // Flat layout: zls binary at root of archive
+        if (entry.kind == .file and (std.mem.eql(u8, entry.name, "zls") or std.mem.eql(u8, entry.name, "zls.exe"))) {
+            var src_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+            const src = try std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ temp_dir, entry.name });
+
+            var dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+            const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version });
+
+            try platform.copyFile(zvm.io, src, dst);
+
+            _ = std.process.run(allocator, zvm.io, .{
+                .argv = &.{ "chmod", "+x", dst },
+            }) catch {};
+            console.success("Installed ZLS", .{});
+            found = true;
+            break;
+        }
+
+        // Nested layout: zls binary inside a subdirectory
         if (entry.kind == .directory) {
             var inner_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
             const inner_path = try std.fmt.bufPrint(&inner_buf, "{s}/{s}", .{ temp_dir, entry.name });
@@ -433,23 +455,28 @@ fn installZls(
             var inner_iter = inner_dir.iterate();
             while (try inner_iter.next(zvm.io)) |inner_entry| {
                 if (std.mem.eql(u8, inner_entry.name, "zls") or std.mem.eql(u8, inner_entry.name, "zls.exe")) {
-                    // Copy the zls binary to data_dir/<version>/zls
                     var src_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
                     const src = try std.fmt.bufPrint(&src_buf, "{s}/{s}/{s}", .{ temp_dir, entry.name, inner_entry.name });
 
                     var dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
                     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version });
 
-                    platform.copyFile(zvm.io, src, dst) catch continue;
+                    try platform.copyFile(zvm.io, src, dst);
 
-                    // Make the binary executable (Unix only, best-effort)
                     _ = std.process.run(allocator, zvm.io, .{
                         .argv = &.{ "chmod", "+x", dst },
                     }) catch {};
                     console.success("Installed ZLS", .{});
+                    found = true;
+                    break;
                 }
             }
+            if (found) break;
         }
+    }
+
+    if (!found) {
+        console.err("ZLS binary not found in archive", .{});
     }
 
     // Cleanup temporary files

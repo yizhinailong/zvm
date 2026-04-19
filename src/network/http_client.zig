@@ -85,11 +85,21 @@ pub fn downloadToFileWithProxy(
     proxy_url: []const u8,
     progress_writer: ?*std.Io.Writer,
 ) !void {
+    const uri = try std.Uri.parse(url);
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.DownloadFailed;
+
+    // For HTTPS with proxy, manually establish a CONNECT tunnel.
+    if (protocol == .tls and proxy_url.len > 0) {
+        const proxy_info = resolveProxy(allocator, environ_map, proxy_url);
+        if (proxy_info) |pi| {
+            return downloadFileViaProxyTunnel(io, uri, pi.host, pi.port, dest_path, progress_writer);
+        }
+    }
+
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     initClientProxy(&client, allocator, environ_map, proxy_url);
 
-    const uri = try std.Uri.parse(url);
     var req = try client.request(.GET, uri, .{
         .redirect_behavior = .init(5),
     });
@@ -194,6 +204,273 @@ fn printProgress(
     try writer.flush();
 }
 
+/// Download content from a URL over HTTPS through a CONNECT proxy tunnel.
+/// Reuses a single reader/writer pair throughout to avoid losing buffered data.
+fn downloadViaProxyTunnel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target_uri: std.Uri,
+    proxy_host: std.Io.net.HostName,
+    proxy_port: u16,
+) ![]const u8 {
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const target_host = try target_uri.getHost(&host_buf);
+    const target_port: u16 = target_uri.port orelse 443;
+
+    // Build the request path (path + query)
+    var path_buf: [4096]u8 = undefined;
+    var path_writer: std.Io.Writer = .fixed(&path_buf);
+    target_uri.writeToStream(&path_writer, .{ .path = true, .query = true }) catch return error.DownloadFailed;
+    var request_path: []const u8 = path_writer.buffered();
+    if (request_path.len == 0) {
+        path_buf[0] = '/';
+        request_path = path_buf[0..1];
+    }
+
+    // 1. Connect to proxy via TCP
+    const stream = std.Io.net.HostName.connect(proxy_host, io, proxy_port, .{ .mode = .stream }) catch {
+        return error.DownloadFailed;
+    };
+    errdefer stream.close(io);
+
+    // Create ONE reader/writer pair with large enough buffers for TLS
+    const buf_len = std.crypto.tls.Client.min_buffer_len;
+    var stream_read_buf: [buf_len]u8 = undefined;
+    var stream_write_buf: [buf_len]u8 = undefined;
+    var stream_reader = stream.reader(io, &stream_read_buf);
+    var stream_writer = stream.writer(io, &stream_write_buf);
+
+    // 2. Send CONNECT request
+    stream_writer.interface.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ target_host.bytes, target_port, target_host.bytes, target_port }) catch {
+        return error.DownloadFailed;
+    };
+    stream_writer.interface.flush() catch {
+        return error.DownloadFailed;
+    };
+
+    // 3. Read CONNECT response (using the same reader, so buffered data is preserved)
+    const response_line = stream_reader.interface.takeSentinel('\n') catch {
+        return error.DownloadFailed;
+    };
+    const status_start = std.mem.indexOfScalar(u8, response_line, ' ') orelse return error.DownloadFailed;
+    const status_str = response_line[status_start + 1 ..];
+    if (status_str.len < 3 or !std.mem.startsWith(u8, status_str, "200")) {
+        return error.DownloadFailed;
+    }
+
+    // Consume remaining headers
+    while (true) {
+        const header_line = stream_reader.interface.takeSentinel('\n') catch return error.DownloadFailed;
+        if (header_line.len == 0 or (header_line.len == 1 and header_line[0] == '\r')) break;
+    }
+
+    // 4. Upgrade to TLS over the tunnel — reuse the same reader/writer
+    var tls_read_buf: [buf_len]u8 = undefined;
+    var tls_write_buf: [buf_len]u8 = undefined;
+
+    var random_buf: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+    io.random(&random_buf);
+
+    const now = std.Io.Clock.real.now(io);
+
+    var tls_client = std.crypto.tls.Client.init(
+        &stream_reader.interface,
+        &stream_writer.interface,
+        .{
+            .host = .{ .explicit = target_host.bytes },
+            .ca = .no_verification,
+            .read_buffer = &tls_read_buf,
+            .write_buffer = &tls_write_buf,
+            .entropy = &random_buf,
+            .realtime_now = now,
+            .allow_truncation_attacks = true,
+        },
+    ) catch {
+        return error.TlsInitializationFailed;
+    };
+
+    // 5. Send HTTP GET request over TLS
+    var req_buf: [4096]u8 = undefined;
+    var req_writer: std.Io.Writer = .fixed(&req_buf);
+    req_writer.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: zvm\r\nConnection: close\r\n\r\n", .{ request_path, target_host.bytes }) catch return error.DownloadFailed;
+    tls_client.writer.writeAll(req_writer.buffered()) catch return error.DownloadFailed;
+    tls_client.writer.flush() catch return error.DownloadFailed;
+    stream_writer.interface.flush() catch return error.DownloadFailed;
+
+    // 6. Read response via TLS
+    const resp_buf = allocator.alloc(u8, 10 * 1024 * 1024) catch return error.DownloadFailed;
+    defer allocator.free(resp_buf);
+    var resp_writer: std.Io.Writer = .fixed(resp_buf);
+    _ = tls_client.reader.streamRemaining(&resp_writer) catch |err| {
+        if (err != error.EndOfStream) return error.DownloadFailed;
+    };
+    const resp_data = resp_writer.buffered();
+
+    // 7. Parse HTTP response
+    const header_end = std.mem.indexOf(u8, resp_data, "\r\n\r\n") orelse {
+        return error.DownloadFailed;
+    };
+    const header_slice = resp_data[0..header_end];
+    const body_start = header_end + 4;
+
+    const first_line = std.mem.sliceTo(header_slice, '\r');
+    if (first_line.len < 12 or !std.mem.startsWith(u8, first_line, "HTTP/1.1 "))
+        return error.DownloadFailed;
+    if (!std.mem.eql(u8, first_line[9..12], "200")) return error.DownloadFailed;
+
+    const result = resp_data[body_start..];
+    return allocator.dupe(u8, result);
+}
+
+/// Download a file from a URL over HTTPS through a CONNECT proxy tunnel.
+/// Streams the response body directly to the destination file.
+fn downloadFileViaProxyTunnel(
+    io: std.Io,
+    target_uri: std.Uri,
+    proxy_host: std.Io.net.HostName,
+    proxy_port: u16,
+    dest_path: []const u8,
+    progress_writer: ?*std.Io.Writer,
+) !void {
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const target_host = try target_uri.getHost(&host_buf);
+    const target_port: u16 = target_uri.port orelse 443;
+
+    var path_buf: [4096]u8 = undefined;
+    var path_writer: std.Io.Writer = .fixed(&path_buf);
+    target_uri.writeToStream(&path_writer, .{ .path = true, .query = true }) catch return error.DownloadFailed;
+    var request_path: []const u8 = path_writer.buffered();
+    if (request_path.len == 0) {
+        path_buf[0] = '/';
+        request_path = path_buf[0..1];
+    }
+
+    const stream = std.Io.net.HostName.connect(proxy_host, io, proxy_port, .{ .mode = .stream }) catch {
+        return error.DownloadFailed;
+    };
+    errdefer stream.close(io);
+
+    const buf_len = std.crypto.tls.Client.min_buffer_len;
+    var stream_read_buf: [buf_len]u8 = undefined;
+    var stream_write_buf: [buf_len]u8 = undefined;
+    var stream_reader = stream.reader(io, &stream_read_buf);
+    var stream_writer = stream.writer(io, &stream_write_buf);
+
+    stream_writer.interface.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ target_host.bytes, target_port, target_host.bytes, target_port }) catch {
+        return error.DownloadFailed;
+    };
+    stream_writer.interface.flush() catch {
+        return error.DownloadFailed;
+    };
+
+    const response_line = stream_reader.interface.takeSentinel('\n') catch {
+        return error.DownloadFailed;
+    };
+    const status_start = std.mem.indexOfScalar(u8, response_line, ' ') orelse return error.DownloadFailed;
+    const status_str = response_line[status_start + 1 ..];
+    if (status_str.len < 3 or !std.mem.startsWith(u8, status_str, "200")) {
+        return error.DownloadFailed;
+    }
+
+    while (true) {
+        const header_line = stream_reader.interface.takeSentinel('\n') catch return error.DownloadFailed;
+        if (header_line.len == 0 or (header_line.len == 1 and header_line[0] == '\r')) break;
+    }
+
+    var tls_read_buf: [buf_len]u8 = undefined;
+    var tls_write_buf: [buf_len]u8 = undefined;
+    var random_buf: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+    io.random(&random_buf);
+    const now = std.Io.Clock.real.now(io);
+
+    var tls_client = std.crypto.tls.Client.init(
+        &stream_reader.interface,
+        &stream_writer.interface,
+        .{
+            .host = .{ .explicit = target_host.bytes },
+            .ca = .no_verification,
+            .read_buffer = &tls_read_buf,
+            .write_buffer = &tls_write_buf,
+            .entropy = &random_buf,
+            .realtime_now = now,
+            .allow_truncation_attacks = true,
+        },
+    ) catch {
+        return error.TlsInitializationFailed;
+    };
+
+    var req_buf: [4096]u8 = undefined;
+    var req_writer: std.Io.Writer = .fixed(&req_buf);
+    req_writer.print("GET {s} HTTP/1.1\r\nHost: {s}\r\nUser-Agent: zvm\r\nConnection: close\r\n\r\n", .{ request_path, target_host.bytes }) catch return error.DownloadFailed;
+    tls_client.writer.writeAll(req_writer.buffered()) catch return error.DownloadFailed;
+    tls_client.writer.flush() catch return error.DownloadFailed;
+    stream_writer.interface.flush() catch return error.DownloadFailed;
+
+    // Read HTTP response headers
+    const first_line = tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
+    if (first_line.len < 12 or !std.mem.startsWith(u8, first_line, "HTTP/1.1 ")) return error.DownloadFailed;
+    if (!std.mem.eql(u8, first_line[9..12], "200")) return error.DownloadFailed;
+
+    var content_length: ?u64 = null;
+    while (true) {
+        const line = tls_client.reader.takeSentinel('\n') catch return error.DownloadFailed;
+        if (line.len == 0 or (line.len == 1 and line[0] == '\r')) break;
+        if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
+            const val = std.mem.trim(u8, line["content-length:".len..], " \r");
+            content_length = std.fmt.parseInt(u64, val, 10) catch null;
+        }
+    }
+
+    const file = try std.Io.Dir.cwd().createFile(io, dest_path, .{});
+    defer file.close(io);
+    var file_buf: [16384]u8 = undefined;
+    var file_writer = file.writer(io, &file_buf);
+
+    if (progress_writer) |pw| {
+        var downloaded: u64 = 0;
+        const start_ns = std.Io.Timestamp.now(io, .awake);
+        var last_update_ns: u64 = 0;
+
+        while (true) {
+            const n = tls_client.reader.stream(&file_writer.interface, .unlimited) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return error.DownloadFailed,
+            };
+            if (n == 0) {
+                try file_writer.interface.flush();
+                continue;
+            }
+            downloaded += n;
+
+            const now_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
+            if (now_ns - last_update_ns > 100_000_000 or (content_length != null and downloaded >= content_length.?)) {
+                last_update_ns = now_ns;
+                printProgress(pw, io, downloaded, content_length, start_ns) catch {};
+            }
+        }
+        try file_writer.interface.flush();
+
+        const final_ns: u64 = @intCast(std.Io.Timestamp.durationTo(start_ns, std.Io.Timestamp.now(io, .awake)).nanoseconds);
+        if (final_ns > 0) {
+            printProgress(pw, io, downloaded, content_length, start_ns) catch {};
+            try pw.writeByte('\n');
+            try pw.flush();
+        }
+    } else {
+        while (true) {
+            const n = tls_client.reader.stream(&file_writer.interface, .unlimited) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return error.DownloadFailed,
+            };
+            if (n == 0) {
+                try file_writer.interface.flush();
+                continue;
+            }
+        }
+        try file_writer.interface.flush();
+    }
+}
+
 /// Download content from a URL into memory.
 /// Caller owns returned memory.
 pub fn downloadToMemory(
@@ -214,20 +491,58 @@ pub fn downloadToMemoryWithProxy(
 ) ![]const u8 {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
+
+    const uri = try std.Uri.parse(url);
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.DownloadFailed;
+
+    // For HTTPS with proxy, manually establish a CONNECT tunnel.
+    // Workaround for Zig's std.http.Client.connectProxied() returning 400.
+    if (protocol == .tls and proxy_url.len > 0) {
+        const proxy_info = resolveProxy(allocator, environ_map, proxy_url);
+        if (proxy_info) |pi| {
+            return downloadViaProxyTunnel(allocator, io, uri, pi.host, pi.port);
+        }
+    }
+
+    // No proxy — use client's built-in proxy support
     initClientProxy(&client, allocator, environ_map, proxy_url);
 
-    var body_buf: [1024 * 1024]u8 = undefined;
+    var body_buf: [10 * 1024 * 1024]u8 = undefined;
     var body_writer: std.Io.Writer = .fixed(&body_buf);
-
     const result = try client.fetch(.{
         .location = .{ .url = url },
         .response_writer = &body_writer,
     });
-
     if (result.status != .ok) return error.DownloadFailed;
-
     const body = body_writer.buffered();
     return allocator.dupe(u8, body);
+}
+
+const ProxyInfo = struct {
+    host: std.Io.net.HostName,
+    port: u16,
+};
+
+/// Resolve proxy host/port from explicit URL or environment variables.
+fn resolveProxy(
+    allocator: std.mem.Allocator,
+    environ_map: *std.process.Environ.Map,
+    proxy_url: []const u8,
+) ?ProxyInfo {
+    const url = if (proxy_url.len > 0) proxy_url else blk: {
+        const names = [_][]const u8{ "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY" };
+        for (names) |name| {
+            if (environ_map.get(name)) |val| {
+                if (val.len > 0) break :blk val;
+            }
+        }
+        break :blk null;
+    } orelse return null;
+
+    const uri = std.Uri.parse(url) catch return null;
+    const host = uri.getHostAlloc(allocator) catch return null;
+    const port: u16 = uri.port orelse 443;
+    return .{ .host = host, .port = port };
 }
 
 /// Format a byte count as a human-readable string (e.g., "1.5MB", "234KB").
