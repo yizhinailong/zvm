@@ -39,6 +39,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         }),
+        // NOTE: Only for 0.16.0, can be removed in 0.17.0
+        // See: https://codeberg.org/ziglang/zig/issues/31272#issuecomment-13790015
+        .use_llvm = true,
     });
 
     const options = b.addOptions();
