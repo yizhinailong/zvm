@@ -87,7 +87,7 @@ pub const ParsedCommand = union(Command) {
         shell: ShellType,
     },
     version,
-    help,
+    help: ?Command,
 };
 
 /// Global flags that apply before the command (e.g., --color).
@@ -147,7 +147,7 @@ pub fn parse(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !stru
         } else if (std.mem.cutPrefix(u8, arg, "--color=")) |val| {
             if (parseColorValue(val)) |c| global_flags.color = c;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            return .{ .global = global_flags, .cmd = .help };
+            return .{ .global = global_flags, .cmd = .{ .help = null } };
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             return .{ .global = global_flags, .cmd = .version };
         } else {
@@ -158,7 +158,7 @@ pub fn parse(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !stru
         }
     }
 
-    const cmd = maybe_cmd orelse return .{ .global = global_flags, .cmd = .help };
+    const cmd = maybe_cmd orelse return .{ .global = global_flags, .cmd = .{ .help = null } };
 
     // Check if the raw command name implies --all
     const auto_all = if (cmd_raw) |raw|
@@ -179,7 +179,7 @@ pub fn parse(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !stru
         .proxy => try parseProxy(allocator, &args),
         .completion => try parseCompletion(&args),
         .version => ParsedCommand.version,
-        .help => ParsedCommand.help,
+        .help => ParsedCommand{ .help = null },
     };
 
     return .{ .global = global_flags, .cmd = parsed };
@@ -203,11 +203,19 @@ fn parseColorValue(val: []const u8) ?bool {
     return null;
 }
 
+fn checkHelp(comptime cmd: Command, arg: []const u8) ?ParsedCommand {
+    if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        return .{ .help = cmd };
+    }
+    return null;
+}
+
 fn parseInstall(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     var flags: InstallFlags = .{};
     var version: ?[]const u8 = null;
 
     while (args.next()) |arg| {
+        if (checkHelp(.install, arg)) |h| return h;
         if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             flags.force = true;
         } else if (std.mem.eql(u8, arg, "--zls")) {
@@ -232,6 +240,7 @@ fn parseUse(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     var version: ?[]const u8 = null;
 
     while (args.next()) |arg| {
+        if (checkHelp(.use, arg)) |h| return h;
         if (std.mem.eql(u8, arg, "--sync")) {
             flags.sync = true;
         } else {
@@ -249,6 +258,7 @@ fn parseList(args: anytype, auto_all: bool) ParsedCommand {
     var flags: ListFlags = .{ .all = auto_all };
 
     while (args.next()) |arg| {
+        if (checkHelp(.list, arg)) |h| return h;
         if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-a")) {
             flags.all = true;
         } else if (std.mem.eql(u8, arg, "--vmu")) {
@@ -261,6 +271,7 @@ fn parseList(args: anytype, auto_all: bool) ParsedCommand {
 
 fn parseUninstall(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     const version = args.next() orelse return error.MissingArgument;
+    if (checkHelp(.uninstall, version)) |h| return h;
     return .{ .uninstall = .{
         .version = try allocator.dupe(u8, version),
     } };
@@ -268,6 +279,7 @@ fn parseUninstall(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
 
 fn parseRun(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     const version = args.next() orelse return error.MissingArgument;
+    if (checkHelp(.run, version)) |h| return h;
 
     var run_args: std.ArrayList([]const u8) = .empty;
     errdefer run_args.deinit(allocator);
@@ -284,6 +296,7 @@ fn parseRun(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
 
 fn parseVmu(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     const subcmd = args.next() orelse return error.MissingArgument;
+    if (checkHelp(.vmu, subcmd)) |h| return h;
     const value = args.next() orelse return error.MissingArgument;
 
     const target: VmuTarget = if (std.mem.eql(u8, subcmd, "zig"))
@@ -301,20 +314,25 @@ fn parseVmu(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
 
 fn parseMirrorlist(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     const url = args.next();
-    return .{ .mirrorlist = .{
-        .url = if (url) |u| try allocator.dupe(u8, u) else null,
-    } };
+    if (url) |u| {
+        if (checkHelp(.mirrorlist, u)) |h| return h;
+        return .{ .mirrorlist = .{ .url = try allocator.dupe(u8, u) } };
+    }
+    return .{ .mirrorlist = .{ .url = null } };
 }
 
 fn parseProxy(allocator: std.mem.Allocator, args: anytype) !ParsedCommand {
     const url = args.next();
-    return .{ .proxy = .{
-        .url = if (url) |u| try allocator.dupe(u8, u) else null,
-    } };
+    if (url) |u| {
+        if (checkHelp(.proxy, u)) |h| return h;
+        return .{ .proxy = .{ .url = try allocator.dupe(u8, u) } };
+    }
+    return .{ .proxy = .{ .url = null } };
 }
 
 fn parseCompletion(args: anytype) !ParsedCommand {
     const shell_str = args.next() orelse return error.MissingArgument;
+    if (checkHelp(.completion, shell_str)) |h| return h;
     const shell: ShellType = if (std.mem.eql(u8, shell_str, "zsh"))
         .zsh
     else if (std.mem.eql(u8, shell_str, "bash"))
@@ -468,6 +486,17 @@ pub fn printCommandHelp(writer: *std.Io.Writer, cmd: Command) !void {
             \\  zvm proxy socks5://127.0.0.1:1080   Set SOCKS5 proxy
             \\  zvm proxy default                   Clear proxy (auto-detect from env)
             \\  zvm proxy                           Show current proxy setting
+            \\
+        ),
+        .completion => try writer.writeAll(
+            \\Generate shell completion script.
+            \\
+            \\Usage:
+            \\  zvm completion <shell>
+            \\
+            \\Supported shells:
+            \\  zsh
+            \\  bash
             \\
         ),
         .version, .help => printHelp(writer) catch {},

@@ -72,8 +72,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Dispatch to the appropriate command handler
     switch (parsed.cmd) {
-        .help => {
-            try cli.printHelp(console.stdout.writer);
+        .help => |maybe_cmd| {
+            if (maybe_cmd) |cmd| {
+                try cli.printCommandHelp(console.stdout.writer, cmd);
+            } else {
+                try cli.printHelp(console.stdout.writer);
+            }
         },
         .version => {
             console.plain("zvm {s}", .{fullVersion()});
