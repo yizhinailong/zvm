@@ -2,8 +2,10 @@
 //! Spawns the zig binary from the requested version directory as a child process.
 
 const std = @import("std");
-const zvm_mod = @import("../core/zvm.zig");
+
 const Console = @import("../core/Console.zig");
+const platform = @import("../core/platform.zig");
+const zvm_mod = @import("../core/zvm.zig");
 
 /// Run a Zig command using a specific installed version.
 /// All arguments after the version are passed through to the zig binary.
@@ -20,10 +22,10 @@ pub fn run(
         std.process.exit(1);
     }
 
-    // Build the zig binary path: data_dir/<version>/zig
+    // Build the zig binary path: data_dir/<version>/zig[.exe]
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const version_dir = zvm.versionPath(&path_buf, version);
-    const zig_path = try std.fmt.allocPrint(allocator, "{s}/zig", .{version_dir});
+    const zig_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, platform.executableName("zig") });
     defer allocator.free(zig_path);
 
     // Build argv: [zig_path, arg1, arg2, ...]

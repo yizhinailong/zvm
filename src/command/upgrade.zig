@@ -5,11 +5,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const zvm_mod = @import("../core/zvm.zig");
+
 const Console = @import("../core/Console.zig");
 const platform = @import("../core/platform.zig");
-const http_client = @import("../network/http_client.zig");
 const update_check = @import("../core/update_check.zig");
+const zvm_mod = @import("../core/zvm.zig");
+const http_client = @import("../network/http_client.zig");
 
 /// Search for the extracted binary inside self_dir, including subdirectories.
 /// The archive may extract into a versioned directory like zvm-v0.1.1-aarch64-macos/.
@@ -160,10 +161,7 @@ pub fn run(
     // Find the extracted binary and replace the current installation.
     // The archive may extract into a subdirectory (e.g. zvm-v0.1.1-aarch64-macos/zvm),
     // so search recursively.
-    const exe_name = comptime switch (builtin.os.tag) {
-        .windows => "zvm.exe",
-        else => "zvm",
-    };
+    const exe_name = platform.executableName("zvm");
 
     // Resolve the current zvm install directory
     const install_dir = blk: {
@@ -231,7 +229,7 @@ pub fn run(
         defer allocator.free(active);
         var ver_buf: [std.fs.max_path_bytes]u8 = undefined;
         const ver_path = zvm.versionPath(&ver_buf, active);
-        const zig_path = std.fmt.allocPrint(allocator, "{s}/zig", .{ver_path}) catch return;
+        const zig_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ ver_path, platform.executableName("zig") }) catch return;
         defer allocator.free(zig_path);
 
         const ver_result = std.process.run(allocator, zvm.io, .{

@@ -61,6 +61,20 @@ pub fn getArchiveExtension() []const u8 {
     };
 }
 
+/// Returns the platform-specific executable filename for a tool.
+/// Windows executables must keep their .exe suffix so shells and editors can find them.
+pub fn executableName(comptime base_name: []const u8) []const u8 {
+    return switch (builtin.os.tag) {
+        .windows => base_name ++ ".exe",
+        else => base_name,
+    };
+}
+
+/// Returns true when the current target uses Windows executable semantics.
+pub fn isWindows() bool {
+    return builtin.os.tag == .windows;
+}
+
 /// Create a symbolic link at `link_path` pointing to `target`.
 /// Removes any existing file/link at `link_path` before creation.
 /// On Windows, creates a directory junction (no admin privileges required).
