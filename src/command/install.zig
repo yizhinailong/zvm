@@ -176,6 +176,20 @@ fn installVersion(
         allocator.free(active);
     } else {
         try zvm.setBin(version);
+
+        // On Windows, ensure the bin directory is in the user PATH
+        if (platform.isWindows()) {
+            var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const bin_path = zvm.binPath(&bin_buf);
+
+            if (platform.addToUserPath(zvm.io, bin_path)) |added| {
+                if (added) {
+                    console.plain("Added zvm bin directory to PATH. Please restart your terminal for changes to take effect.", .{});
+                }
+            } else |err| {
+                console.warn("Failed to update PATH ({s}). Please add {s} to your PATH manually.", .{ @errorName(err), bin_path });
+            }
+        }
     }
 
     // Clean up the downloaded archive
