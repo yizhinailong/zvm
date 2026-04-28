@@ -4,14 +4,15 @@
 //! Optionally installs ZLS (Zig Language Server) alongside Zig.
 
 const std = @import("std");
-const zvm_mod = @import("../core/zvm.zig");
+
 const cli = @import("../cli.zig");
-const platform = @import("../core/platform.zig");
 const Console = @import("../core/Console.zig");
-const version_map = @import("../network/version_map.zig");
-const http_client = @import("../network/http_client.zig");
-const archive = @import("archive.zig");
 const crypto = @import("../core/crypto.zig");
+const platform = @import("../core/platform.zig");
+const zvm_mod = @import("../core/zvm.zig");
+const http_client = @import("../network/http_client.zig");
+const version_map = @import("../network/version_map.zig");
+const archive = @import("archive.zig");
 
 /// Main entry point for the `zvm install` command.
 /// Resolves the requested version, checks if already installed,
@@ -45,7 +46,7 @@ pub fn run(
             if (version_map.getMasterVersion(vmap)) |remote_ver| {
                 var ver_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const ver_path = zvm.versionPath(&ver_buf, version);
-                const zig_path = try std.fmt.allocPrint(allocator, "{s}/zig", .{ver_path});
+                const zig_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ver_path, platform.executableName("zig") });
                 defer allocator.free(zig_path);
 
                 const result = std.process.run(allocator, zvm.io, .{
@@ -305,7 +306,7 @@ fn verifyInstall(
 ) !bool {
     var ver_buf: [std.fs.max_path_bytes]u8 = undefined;
     const ver_path = zvm.versionPath(&ver_buf, version);
-    const zig_path = try std.fmt.allocPrint(allocator, "{s}/zig", .{ver_path});
+    const zig_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ver_path, platform.executableName("zig") });
     defer allocator.free(zig_path);
 
     // Create a temporary test file in the cache directory
@@ -357,7 +358,7 @@ fn installZls(
     // Get the installed Zig version string
     var ver_buf: [std.fs.max_path_bytes]u8 = undefined;
     const ver_path = zvm.versionPath(&ver_buf, version);
-    const zig_path = try std.fmt.allocPrint(allocator, "{s}/zig", .{ver_path});
+    const zig_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ ver_path, platform.executableName("zig") });
     defer allocator.free(zig_path);
 
     const result = std.process.run(allocator, zvm.io, .{
@@ -431,6 +432,7 @@ fn installZls(
             return;
         },
     };
+    const zls_exe_name = platform.executableName("zls");
 
     // Download ZLS archive
     const zls_archive_name = if (std.mem.lastIndexOfScalar(u8, zls_tarball, '/')) |idx| zls_tarball[idx + 1 ..] else "zls-archive";
@@ -443,6 +445,7 @@ fn installZls(
     // Extract to a temporary directory
     var temp_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
     const temp_dir = try std.fmt.bufPrint(&temp_buf, "{s}/zls-temp", .{zvm.cache_dir});
+    std.Io.Dir.cwd().deleteTree(zvm.io, temp_dir) catch {};
     std.Io.Dir.cwd().createDirPath(zvm.io, temp_dir) catch {};
 
     archive.extractArchive(allocator, zvm.io, zls_archive_path, temp_dir) catch {
@@ -459,18 +462,21 @@ fn installZls(
     var iter = temp_handle.iterate();
     while (try iter.next(zvm.io)) |entry| {
         // Flat layout: zls binary at root of archive
-        if (entry.kind == .file and (std.mem.eql(u8, entry.name, "zls") or std.mem.eql(u8, entry.name, "zls.exe"))) {
+        if (entry.kind == .file and std.mem.eql(u8, entry.name, zls_exe_name)) {
             var src_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
             const src = try std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ temp_dir, entry.name });
 
             var dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
-            const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version });
+            const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/{s}", .{ zvm.data_dir, version, zls_exe_name });
 
             try platform.copyFile(zvm.io, src, dst);
+            deleteLegacyZlsWithoutExtension(zvm, version, zls_exe_name);
 
-            _ = std.process.run(allocator, zvm.io, .{
-                .argv = &.{ "chmod", "+x", dst },
-            }) catch {};
+            if (!platform.isWindows()) {
+                _ = std.process.run(allocator, zvm.io, .{
+                    .argv = &.{ "chmod", "+x", dst },
+                }) catch {};
+            }
             console.success("Installed ZLS", .{});
             found = true;
             break;
@@ -486,18 +492,21 @@ fn installZls(
 
             var inner_iter = inner_dir.iterate();
             while (try inner_iter.next(zvm.io)) |inner_entry| {
-                if (std.mem.eql(u8, inner_entry.name, "zls") or std.mem.eql(u8, inner_entry.name, "zls.exe")) {
+                if (inner_entry.kind == .file and std.mem.eql(u8, inner_entry.name, zls_exe_name)) {
                     var src_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
                     const src = try std.fmt.bufPrint(&src_buf, "{s}/{s}/{s}", .{ temp_dir, entry.name, inner_entry.name });
 
                     var dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
-                    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version });
+                    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/{s}/{s}", .{ zvm.data_dir, version, zls_exe_name });
 
                     try platform.copyFile(zvm.io, src, dst);
+                    deleteLegacyZlsWithoutExtension(zvm, version, zls_exe_name);
 
-                    _ = std.process.run(allocator, zvm.io, .{
-                        .argv = &.{ "chmod", "+x", dst },
-                    }) catch {};
+                    if (!platform.isWindows()) {
+                        _ = std.process.run(allocator, zvm.io, .{
+                            .argv = &.{ "chmod", "+x", dst },
+                        }) catch {};
+                    }
                     console.success("Installed ZLS", .{});
                     found = true;
                     break;
@@ -514,4 +523,14 @@ fn installZls(
     // Cleanup temporary files
     std.Io.Dir.cwd().deleteFile(zvm.io, zls_archive_path) catch {};
     std.Io.Dir.cwd().deleteTree(zvm.io, temp_dir) catch {};
+}
+
+/// Remove the extensionless ZLS file left by older Windows installs.
+/// No-op on Linux/macOS where the expected executable name is already "zls".
+fn deleteLegacyZlsWithoutExtension(zvm: *zvm_mod.ZVM, version: []const u8, zls_exe_name: []const u8) void {
+    if (std.mem.eql(u8, zls_exe_name, "zls")) return;
+
+    var legacy_dst_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+    const legacy_dst = std.fmt.bufPrint(&legacy_dst_buf, "{s}/{s}/zls", .{ zvm.data_dir, version }) catch return;
+    std.Io.Dir.cwd().deleteFile(zvm.io, legacy_dst) catch {};
 }
