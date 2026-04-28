@@ -61,6 +61,20 @@ pub fn getArchiveExtension() []const u8 {
     };
 }
 
+/// Returns the platform-specific executable filename for a tool.
+/// Windows executables must keep their .exe suffix so shells and editors can find them.
+pub fn executableName(comptime base_name: []const u8) []const u8 {
+    return switch (builtin.os.tag) {
+        .windows => base_name ++ ".exe",
+        else => base_name,
+    };
+}
+
+/// Returns true when the current target uses Windows executable semantics.
+pub fn isWindows() bool {
+    return builtin.os.tag == .windows;
+}
+
 /// Create a symbolic link at `link_path` pointing to `target`.
 /// Removes any existing file/link at `link_path` before creation.
 /// On Windows, creates a directory junction (no admin privileges required).
@@ -211,4 +225,161 @@ pub fn copyFile(io: std.Io, src_path: []const u8, dst_path: []const u8) !void {
 
     _ = src_reader.interface.streamRemaining(&dst_writer.interface) catch return error.CopyFailed;
     try dst_writer.interface.flush();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Windows PATH management — automatically add zvm bin directory to user PATH
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Check if a directory is already in the Windows user PATH environment variable.
+/// Performs case-insensitive comparison (Windows paths are case-insensitive).
+/// Returns false on non-Windows platforms or on any error.
+pub fn isInUserPath(io: std.Io, dir_path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+
+    // Normalize dir_path to use backslashes
+    var dir_norm: [std.fs.max_path_bytes]u8 = undefined;
+    if (dir_path.len > dir_norm.len) return false;
+    @memcpy(dir_norm[0..dir_path.len], dir_path);
+    std.mem.replaceScalar(u8, dir_norm[0..dir_path.len], '/', '\\');
+    const normalized = dir_norm[0..dir_path.len];
+
+    // Read current user PATH from registry
+    const read_result = std.process.run(std.heap.page_allocator, io, .{
+        .argv = &.{ "reg", "query", "HKCU\\Environment", "/v", "PATH" },
+        .stdout_limit = .limited(65536),
+        .stderr_limit = .limited(4096),
+    }) catch return false;
+    defer std.heap.page_allocator.free(read_result.stdout);
+    defer std.heap.page_allocator.free(read_result.stderr);
+
+    if (read_result.term != .exited or read_result.term.exited != 0) return false;
+
+    // Parse reg query output to find PATH value
+    // Output format: "    PATH    REG_EXPAND_SZ    C:\Users\..."
+    const stdout = read_result.stdout;
+    var line_iter = std.mem.splitScalar(u8, stdout, '\n');
+    while (line_iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        // Look for REG_EXPAND_SZ or REG_SZ and extract the value
+        if (std.mem.indexOf(u8, trimmed, "REG_EXPAND_SZ")) |idx| {
+            const value_start = idx + "REG_EXPAND_SZ".len;
+            const value = std.mem.trim(u8, trimmed[value_start..], " \t");
+            return containsPathEntry(value, normalized);
+        }
+        if (std.mem.indexOf(u8, trimmed, "REG_SZ")) |idx| {
+            const value_start = idx + "REG_SZ".len;
+            const value = std.mem.trim(u8, trimmed[value_start..], " \t");
+            return containsPathEntry(value, normalized);
+        }
+    }
+
+    return false;
+}
+
+/// Add a directory to the Windows user PATH environment variable in the registry.
+/// Does nothing if the directory is already present.
+/// Returns true if PATH was updated, false if already present.
+/// No-op on non-Windows platforms (returns false).
+pub fn addToUserPath(io: std.Io, dir_path: []const u8) !bool {
+    if (builtin.os.tag != .windows) return false;
+
+    // Normalize dir_path to use backslashes
+    var dir_norm: [std.fs.max_path_bytes]u8 = undefined;
+    if (dir_path.len > dir_norm.len) return error.PathTooLong;
+    @memcpy(dir_norm[0..dir_path.len], dir_path);
+    std.mem.replaceScalar(u8, dir_norm[0..dir_path.len], '/', '\\');
+    const normalized = dir_norm[0..dir_path.len];
+
+    // Read current user PATH from registry
+    const read_result = std.process.run(std.heap.page_allocator, io, .{
+        .argv = &.{ "reg", "query", "HKCU\\Environment", "/v", "PATH" },
+        .stdout_limit = .limited(65536),
+        .stderr_limit = .limited(4096),
+    }) catch return error.PathUpdateFailed;
+    defer std.heap.page_allocator.free(read_result.stdout);
+    defer std.heap.page_allocator.free(read_result.stderr);
+
+    // If reg query failed (e.g., PATH doesn't exist), create initial PATH
+    if (read_result.term != .exited or read_result.term.exited != 0) {
+        return try createInitialUserPath(io, normalized);
+    }
+
+    // Parse reg query output to find current PATH value
+    const stdout = read_result.stdout;
+    var current_path: []const u8 = "";
+    var line_iter = std.mem.splitScalar(u8, stdout, '\n');
+    while (line_iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (std.mem.indexOf(u8, trimmed, "REG_EXPAND_SZ")) |idx| {
+            const value_start = idx + "REG_EXPAND_SZ".len;
+            current_path = std.mem.trim(u8, trimmed[value_start..], " \t");
+            break;
+        }
+        if (std.mem.indexOf(u8, trimmed, "REG_SZ")) |idx| {
+            const value_start = idx + "REG_SZ".len;
+            current_path = std.mem.trim(u8, trimmed[value_start..], " \t");
+            break;
+        }
+    }
+
+    // Check if already in PATH
+    if (containsPathEntry(current_path, normalized)) return false;
+
+    // Build new PATH with the directory appended
+    var new_path_buf: [65536]u8 = undefined;
+    const separator = if (current_path.len > 0) ";" else "";
+    const new_path = std.fmt.bufPrint(&new_path_buf, "{s}{s}{s}", .{ current_path, separator, normalized }) catch return error.PathTooLong;
+
+    // Write updated PATH to registry using reg add
+    try writeUserPath(io, new_path);
+
+    return true;
+}
+
+/// Create an initial user PATH entry in the registry with just the given directory.
+fn createInitialUserPath(io: std.Io, dir_path: []const u8) !bool {
+    try writeUserPath(io, dir_path);
+    return true;
+}
+
+/// Write a value to the user PATH in the Windows registry.
+fn writeUserPath(io: std.Io, path_value: []const u8) !void {
+    const result = std.process.run(std.heap.page_allocator, io, .{
+        .argv = &.{ "reg", "add", "HKCU\\Environment", "/v", "PATH", "/t", "REG_EXPAND_SZ", "/d", path_value, "/f" },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return error.PathUpdateFailed;
+    defer std.heap.page_allocator.free(result.stdout);
+    defer std.heap.page_allocator.free(result.stderr);
+
+    if (result.term != .exited or result.term.exited != 0)
+        return error.PathUpdateFailed;
+}
+
+/// Check if a semicolon-separated PATH string contains a specific entry.
+/// Performs case-insensitive, slash-normalized comparison and trims trailing backslashes.
+fn containsPathEntry(path_str: []const u8, entry: []const u8) bool {
+    var iter = std.mem.splitScalar(u8, path_str, ';');
+    while (iter.next()) |part| {
+        var p = std.mem.trim(u8, part, " \t");
+        // Trim trailing backslashes for comparison
+        while (p.len > 0 and p[p.len - 1] == '\\') {
+            p = p[0 .. p.len - 1];
+        }
+        // Case-insensitive, slash-normalized comparison
+        if (pathEqual(p, entry)) return true;
+    }
+    return false;
+}
+
+/// Compare two path strings case-insensitively, treating '/' and '\\' as equal.
+fn pathEqual(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (0..a.len) |i| {
+        const ca: u8 = if (a[i] == '/') '\\' else a[i];
+        const cb: u8 = if (b[i] == '/') '\\' else b[i];
+        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+    }
+    return true;
 }
