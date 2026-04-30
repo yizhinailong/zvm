@@ -53,9 +53,17 @@ pub fn downloadToFileWithProxy(
     const uri = try std.Uri.parse(url);
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.DownloadFailed;
 
-    // For HTTPS with proxy, manually establish a CONNECT tunnel.
-    if (protocol == .tls and proxy_url.len > 0) {
-        const proxy_info = proxy_tunnel.resolveProxy(allocator, environ_map, proxy_url);
+    // Arena for proxy-related allocations (Proxy objects, host strings).
+    // std.http.Client.deinit() does not free proxy objects (they're externally-owned),
+    // so we manage their lifetime via this arena.
+    var proxy_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer proxy_arena.deinit();
+
+    // For HTTPS through a proxy, manually establish a CONNECT tunnel.
+    // Workaround for Zig's std.http.Client.connectProxied() returning 400.
+    // Checks both explicit proxy_url and environment variables (http_proxy, etc.).
+    if (protocol == .tls) {
+        const proxy_info = proxy_tunnel.resolveProxy(proxy_arena.allocator(), environ_map, proxy_url);
         if (proxy_info) |pi| {
             return downloadFileViaProxyTunnel(allocator, io, uri, pi.host, pi.port, dest_path, progress_writer);
         }
@@ -63,7 +71,7 @@ pub fn downloadToFileWithProxy(
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    initClientProxy(&client, allocator, environ_map, proxy_url);
+    initClientProxy(&client, proxy_arena.allocator(), environ_map, proxy_url);
 
     var req = try client.request(.GET, uri, .{
         .redirect_behavior = .init(5),
@@ -263,23 +271,28 @@ pub fn downloadToMemoryWithProxy(
     url: []const u8,
     proxy_url: []const u8,
 ) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
+    var proxy_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer proxy_arena.deinit();
 
     const uri = try std.Uri.parse(url);
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.DownloadFailed;
 
-    // For HTTPS with proxy, manually establish a CONNECT tunnel.
+    // For HTTPS through a proxy, manually establish a CONNECT tunnel.
     // Workaround for Zig's std.http.Client.connectProxied() returning 400.
-    if (protocol == .tls and proxy_url.len > 0) {
-        const proxy_info = proxy_tunnel.resolveProxy(allocator, environ_map, proxy_url);
+    // Checks both explicit proxy_url and environment variables (http_proxy, etc.).
+    if (protocol == .tls) {
+        const proxy_info = proxy_tunnel.resolveProxy(proxy_arena.allocator(), environ_map, proxy_url);
         if (proxy_info) |pi| {
             return downloadViaProxyTunnel(allocator, io, uri, pi.host, pi.port);
         }
     }
 
-    // No proxy — use client's built-in proxy support
-    initClientProxy(&client, allocator, environ_map, proxy_url);
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    // No proxy for HTTPS, or plain HTTP — use client's built-in proxy support.
+    // Use proxy_arena for proxy allocations: std.http.Client.deinit() does not free
+    // proxy objects (they're externally-owned), so we manage their lifetime via the arena.
+    initClientProxy(&client, proxy_arena.allocator(), environ_map, proxy_url);
 
     var body_buf: [10 * 1024 * 1024]u8 = undefined;
     var body_writer: std.Io.Writer = .fixed(&body_buf);

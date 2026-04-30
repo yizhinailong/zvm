@@ -178,12 +178,16 @@ fn probeThreadMainWindows(ctx: *ProbeThreadContext) void {
     const io = ctx.io orelse return;
     const environ_map = ctx.environ_map orelse return;
 
+    // Arena for proxy-related allocations: std.http.Client.deinit() does not free
+    // proxy objects (they're externally-owned), so we manage their lifetime via the arena.
+    var proxy_arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     var client: std.http.Client = .{ .allocator = ctx.allocator, .io = io };
+    defer proxy_arena.deinit();
     defer client.deinit();
     if (ctx.proxy.len > 0) {
-        proxy_tunnel.setProxyFromUrl(&client, ctx.allocator, ctx.proxy) catch {};
+        proxy_tunnel.setProxyFromUrl(&client, proxy_arena.allocator(), ctx.proxy) catch {};
     } else {
-        client.initDefaultProxies(ctx.allocator, environ_map) catch {};
+        client.initDefaultProxies(proxy_arena.allocator(), environ_map) catch {};
     }
 
     const uri = std.Uri.parse(ctx.url) catch return;
